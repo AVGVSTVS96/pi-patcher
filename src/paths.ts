@@ -18,7 +18,8 @@ export const STATE = path.join(HOME, "state.json");
 export const PROMPTS_DIR = path.join(ROOT, "prompts");
 export const BUNDLED_PATCHES = path.join(ROOT, "patches");
 
-export const HEAL_MODEL = "openai-codex/gpt-5.5:low";
+export const HEAL_MODEL =
+  process.env.PI_PATCHER_HEAL_MODEL ?? "openai-codex/gpt-5.5:low";
 
 // ── Layout bootstrap ─────────────────────────────────────────
 export function ensureLayout(): void {

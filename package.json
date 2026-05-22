@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "bun run src/cli.ts",
     "typecheck": "tsc --noEmit",
+    "test": "bun test",
     "build": "tsc --noEmit && bun build src/cli.ts --target=node --outfile=dist/cli.js && chmod +x dist/cli.js",
     "prepack": "bun run build",
     "postinstall": "node ./dist/cli.js reconcile || true"

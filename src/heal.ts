@@ -25,17 +25,20 @@ import {
   type State,
 } from "./util.js";
 
-export function heal(patch: Patch, piRoot: string, state: State): void {
+export function heal(patch: Patch, piRoot: string, state: State): boolean {
   const file = filesOf(patch.spec)[0];
   if (!file) throw new Error(`${patch.id}: no files in spec`);
 
   const target = resolveTarget(piRoot, file.target);
   const before = fs.readFileSync(target, "utf8");
-  const backup = backupFile(target, piVersion());
+  backupFile(target, piVersion());
   const entry = patchEntry(state, patch.id);
 
   say(`pi-patcher: ${patch.id} drifted. Self-healing…`);
-  const { output, sessionPath } = runHealSession(patch, target);
+  const { output, sessionPath, error, signal, status } = runHealSession(
+    patch,
+    target,
+  );
   if (sessionPath)
     entry.lastSessions = [sessionPath, ...(entry.lastSessions ?? [])].slice(
       0,
@@ -44,14 +47,34 @@ export function heal(patch: Patch, piRoot: string, state: State): void {
 
   const abort = output.match(/===ABORT===([\s\S]*?)===END===/);
   if (abort)
-    return rollback(target, backup, entry, abort[1]!.trim(), sessionPath);
+    return rollback(target, before, entry, abort[1]!.trim(), sessionPath);
+
+  if (error)
+    return rollback(
+      target,
+      before,
+      entry,
+      `failed to start pi: ${error.message}`,
+      sessionPath,
+    );
+
+  if (status !== 0)
+    return rollback(
+      target,
+      before,
+      entry,
+      signal
+        ? `pi heal session terminated by signal ${signal}`
+        : `pi heal session exited with status ${status ?? "unknown"}`,
+      sessionPath,
+    );
 
   try {
     nodeCheck(target);
   } catch (error) {
     return rollback(
       target,
-      backup,
+      before,
       entry,
       `node --check failed: ${errorMessage(error)}`,
       sessionPath,
@@ -60,10 +83,14 @@ export function heal(patch: Patch, piRoot: string, state: State): void {
 
   const after = fs.readFileSync(target, "utf8");
   const derived = deriveSingleReplacement(before, after);
-  if (!derived || count(after, derived.newText) !== 1) {
+  if (
+    !derived ||
+    count(before, derived.oldText) !== 1 ||
+    count(after, derived.newText) !== 1
+  ) {
     return rollback(
       target,
-      backup,
+      before,
       entry,
       "edits did not produce a derivable patch",
       sessionPath,
@@ -77,13 +104,20 @@ export function heal(patch: Patch, piRoot: string, state: State): void {
   say(
     `pi-patcher: ${patch.id} healed. Session: pi --session ${sessionPath ?? "(no session)"}`,
   );
+  return true;
 }
 
 // ── LLM call ─────────────────────────────────────────────────
 function runHealSession(
   patch: Patch,
   target: string,
-): { output: string; sessionPath: string | undefined } {
+): {
+  output: string;
+  sessionPath: string | undefined;
+  error: Error | undefined;
+  signal: NodeJS.Signals | null;
+  status: number | null;
+} {
   const sessionDir = path.join(
     HEAL_SESSIONS,
     `${patch.id}-${new Date().toISOString().replace(/[:.]/g, "-")}`,
@@ -103,7 +137,13 @@ function runHealSession(
   const output = `${child.stdout ?? ""}${child.stderr ?? ""}`;
   if (output.trim())
     process.stdout.write(output.endsWith("\n") ? output : `${output}\n`);
-  return { output, sessionPath: latestSessionFile(sessionDir) };
+  return {
+    output,
+    sessionPath: latestSessionFile(sessionDir),
+    error: child.error,
+    signal: child.signal,
+    status: child.status,
+  };
 }
 
 function renderPrompt(patch: Patch, targetPath: string): string {
@@ -128,17 +168,18 @@ function latestSessionFile(dir: string): string | undefined {
 // ── Rollback + spec rewrite ──────────────────────────────────
 function rollback(
   target: string,
-  backup: string,
+  before: string,
   entry: { lastError?: string },
   reason: string,
   session: string | undefined,
-): void {
-  fs.copyFileSync(backup, target);
+): false {
+  fs.writeFileSync(target, before);
   entry.lastError = reason;
   say(
     `pi-patcher: not healed. Inspect: pi --session ${session ?? "(no session)"}`,
   );
   say(`Reason: ${reason}`);
+  return false;
 }
 
 function rewriteSpec(

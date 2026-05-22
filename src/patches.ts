@@ -145,26 +145,41 @@ function mutate(
   reverse: boolean,
 ): boolean {
   const version = piVersion();
+  const originals = new Map<string, string>();
   let changed = false;
-  for (const file of filesOf(patch.spec)) {
-    const target = resolveTarget(piRoot, file.target);
-    const original = fs.readFileSync(target, "utf8");
-    let text = original;
-    backupFile(target, version);
-    for (const r of file.replacements ?? []) {
-      const from = reverse ? r.newText : r.oldText;
-      const to = reverse ? r.oldText : r.newText;
-      if (count(text, from) !== 1) continue;
-      text = text.replace(from, to);
+  let lastText: string | undefined;
+
+  try {
+    for (const file of filesOf(patch.spec)) {
+      const target = resolveTarget(piRoot, file.target);
+      const original = fs.readFileSync(target, "utf8");
+      let text = original;
+      backupFile(target, version);
+      for (const r of file.replacements ?? []) {
+        const from = reverse ? r.newText : r.oldText;
+        const to = reverse ? r.oldText : r.newText;
+        if (count(text, from) !== 1) continue;
+        text = text.replace(from, to);
+      }
+      if (text === original) continue;
+      if (!originals.has(target)) originals.set(target, original);
+      fs.writeFileSync(target, text);
+      nodeCheck(target);
+      changed = true;
+      lastText = text;
     }
-    if (text === original) continue;
-    fs.writeFileSync(target, text);
-    nodeCheck(target);
-    changed = true;
+  } catch (error) {
+    for (const [target, original] of originals)
+      fs.writeFileSync(target, original);
+    throw error;
+  }
+
+  if (changed) {
     const entry = patchEntry(state, patch.id);
     entry.lastAppliedAt = new Date().toISOString();
-    entry.lastTargetSha = sha(text);
+    if (lastText) entry.lastTargetSha = sha(lastText);
     entry.removed = reverse;
+    delete entry.lastError;
   }
   return changed;
 }

@@ -1,6 +1,6 @@
 # pi-patcher
 
-Self healing patches for [pi](https://github.com/earendil-works/pi-coding-agent) 
+Self healing patches for [pi](https://github.com/earendil-works/pi-coding-agent)
 
 Want to modify `pi` but your changes require a patch? Use `pi-patcher` to automatically apply patches to pi's source code on `pi update`. When patching fails due to updates to target files, `pi-patcher` uses `pi` to self-heal: it updates the patch file for the new code and applies it.
 
@@ -33,7 +33,9 @@ pi-patcher list         # show patch state + latest heal session
 pi-patcher heal <id>    # force-heal one patch
 pi-patcher remove <id>  # tombstone a patch (reversed on next reconcile)
 ```
+
 <!-- TODO: `remove` should actively remove the patch, not wait for next reconcile -->
+
 ## Writing a patch
 
 A patch is just a folder in `~/.pi/pi-patcher/patches/` with: <!-- TODO: move patches to `~/.pi/patches` -->
@@ -53,12 +55,25 @@ To remove a patch, rename the folder to `_<id>`. Next reconcile reverses it.
 When the literal `oldText`/`newText` no longer matches, pi-patcher:
 
 - snapshots the target file
-- pipes `prompts/heal.md` (with intent, old spec, and target path interpolated) into `pi -p --model openai-codex/gpt-5.5:low --session-dir <heal-sessions>/<id>-<ts>/`
+- pipes `prompts/heal.md` (with intent, old spec, and target path interpolated) into `pi -p --model ${PI_PATCHER_HEAL_MODEL:-openai-codex/gpt-5.5:low} --session-dir <heal-sessions>/<id>-<ts>/`
 - lets pi edit the target directly
 - runs `node --check` on the result; rolls back if it fails
 - diffs before/after, derives a new minimal `oldText`/`newText`, and writes it back to `spec.json`
 
-If pi decides the original intent no longer makes sense (feature removed, code redesigned), it emits `===ABORT===` and pi-patcher rolls back cleanly. Every session is saved and it's ID is logged, replay with `pi --session <path>`.
+If pi decides the original intent no longer makes sense (feature removed, code redesigned), it emits `===ABORT===` and pi-patcher rolls back cleanly. Every session is saved and its ID is logged; replay with `pi --session <path>`.
+
+## Model configuration
+
+By default, pi-patcher uses `openai-codex/gpt-5.5:low` for self-healing.
+Set `PI_PATCHER_HEAL_MODEL` to use a different pi model.
+
+## Development
+
+```sh
+bun test
+bun run typecheck
+bun run build
+```
 
 ## Layout
 
