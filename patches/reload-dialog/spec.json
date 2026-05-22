@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "target": "dist/modes/interactive/interactive-mode.js",
+      "replacements": [
+        {
+          "anchorHint": "inside handleReloadCommand after dismissReloadBox(this.editor)",
+          "oldText": "            this.showLoadedResources({\n                force: false,\n                showDiagnosticsWhenQuiet: true,\n            });",
+          "newText": "            this.showLoadedResources({\n                force: true,\n                asDialog: true,\n                showDiagnosticsWhenQuiet: true,\n            });"
+        }
+      ]
+    }
+  ]
+}

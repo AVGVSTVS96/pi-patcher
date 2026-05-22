@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "target": "dist/package-manager-cli.js",
+      "replacements": [
+        {
+          "anchorHint": "end of the pi self-update branch, immediately after Updated ${APP_NAME}",
+          "oldText": "                    console.log(chalk.green(`Updated ${APP_NAME}`));\n",
+          "newText": "                    console.log(chalk.green(`Updated ${APP_NAME}`));\n                    try { require(\"child_process\").spawnSync(\"pi-patcher\", [\"reconcile\", \"--after-update\"], { stdio: \"inherit\" }); } catch {}\n"
+        }
+      ]
+    }
+  ]
+}

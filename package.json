@@ -1,0 +1,19 @@
+{
+  "name": "pi-patcher",
+  "version": "0.1.0",
+  "description": "Update-resilient self-healing patches for pi installs.",
+  "type": "module",
+  "bin": {
+    "pi-patcher": "./src/cli.js"
+  },
+  "scripts": {
+    "postinstall": "node ./src/cli.js reconcile || true"
+  },
+  "files": [
+    "src",
+    "prompts",
+    "patches",
+    "README.md"
+  ],
+  "license": "MIT"
+}
