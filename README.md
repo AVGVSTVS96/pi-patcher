@@ -50,17 +50,27 @@ A patch is just a folder in `~/.pi/patches/`:
 
 Each `oldText` must appear exactly once in the target file. `newText` must be non-empty — deletion-only patches aren't supported in this version (replace the line with a comment instead).
 
+A spec can contain multiple files and multiple replacements per file. Mechanical apply, revert, and AI heal all iterate over every entry; heal runs one AI session per drifted replacement and rewrites only that entry's `oldText`/`newText`.
+
+JavaScript and JSON targets are syntax-checked after every edit. Any other file type (markdown, plain text, etc.) is supported.
+
 ## How healing works
 
 When the literal `oldText`/`newText` no longer matches, pi-patcher hands the work to pi:
 
 - the target file is snapshotted first
 - `pi -p --model ${PI_PATCHER_HEAL_MODEL:-openai-codex/gpt-5.5:low} --session-dir <heal-sessions>/<id>-<ts>/` is invoked with `prompts/heal.md` on stdin
-- `node --check` runs on the result; the snapshot is restored on failure
+- the result is syntax-checked (JS / JSON only); the snapshot is restored on failure
 - if pi decides the change is out of scope (feature removed, would require a redesign), it emits `===ABORT===` and pi-patcher rolls back cleanly
 - on success, pi-patcher derives a fresh `oldText`/`newText` from the AI's edit and saves it to `spec.json`
 
 Every session is saved and its path is logged; replay with `pi --session <path>`.
+
+## Current limits
+
+- **No deletion patches.** `newText === ""` is rejected at spec load. Replace the line with a comment or no-op instead.
+- **No AI revert.** `pi-patcher remove` won't ask the AI to undo a drifted patch; it exits non-zero and asks you to clean the file by hand, then retry.
+- **Heal runs one AI session per drifted replacement.** A multi-replacement patch where three replacements have drifted spawns three heal sessions in sequence.
 
 ## Model configuration
 

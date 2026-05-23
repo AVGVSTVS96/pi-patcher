@@ -8,13 +8,14 @@ import {
   HEAL_SESSIONS,
   PROMPTS_DIR,
   backupFile,
+  classify,
   count,
   derivePatch,
-  nodeCheck,
   piVersion,
   resolveTarget,
   saveSpec,
   sha,
+  validateTarget,
 } from "./patches.js";
 import {
   type State,
@@ -24,20 +25,50 @@ import {
 } from "./state.js";
 
 /**
- * Re-anchor a drifted patch by handing the work to pi itself. On success the
- * patch's spec is rewritten with the new oldText/newText derived from the
- * AI's edit. On failure the target file is restored from the in-memory
- * snapshot and an error is recorded in state. Returns true on success.
+ * Re-anchor every drifted replacement in a patch by handing each one to
+ * pi in turn. Replacements that are already applied are skipped. Each AI
+ * session is scoped to a single specific replacement; only that
+ * file/replacement entry in `spec.json` is rewritten on success.
+ *
+ * Returns true iff every drifted replacement healed successfully.
  */
 export function heal(patch: Patch, piRoot: string, state: State): boolean {
-  const file = patch.spec.files[0];
-  if (!file) throw new Error(`${patch.id}: no files in spec`);
+  let ok = true;
+  for (let fi = 0; fi < patch.spec.files.length; fi++) {
+    const file = patch.spec.files[fi]!;
+    for (let ri = 0; ri < file.replacements.length; ri++) {
+      const target = resolveTarget(piRoot, file.target);
+      if (!fs.existsSync(target)) {
+        ok = false;
+        recordError(state, patch.id, `${file.target}: target file missing`);
+        continue;
+      }
+      const text = fs.readFileSync(target, "utf8");
+      // patch.spec is mutated in place by saveSpec after each successful
+      // heal; re-read the replacement freshly so classification is correct.
+      const replacement = patch.spec.files[fi]!.replacements[ri]!;
+      if (classify(replacement, text) !== "drift") continue;
+      if (!healOne(patch, fi, ri, piRoot, state)) ok = false;
+    }
+  }
+  return ok;
+}
 
+function healOne(
+  patch: Patch,
+  fi: number,
+  ri: number,
+  piRoot: string,
+  state: State,
+): boolean {
+  const file = patch.spec.files[fi]!;
+  const replacement = file.replacements[ri]!;
   const target = resolveTarget(piRoot, file.target);
   const before = fs.readFileSync(target, "utf8");
   backupFile(target, piVersion());
 
-  say(`pi-patcher: ${patch.id} drifted. Self-healing\u2026`);
+  const label = healLabel(patch, fi, ri);
+  say(`pi-patcher: ${label} drifted. Self-healing\u2026`);
 
   const sessionDir = path.join(
     HEAL_SESSIONS,
@@ -49,7 +80,7 @@ export function heal(patch: Patch, piRoot: string, state: State): boolean {
     "pi",
     ["-p", "--model", HEAL_MODEL, "--session-dir", sessionDir],
     {
-      input: renderPrompt(patch, target),
+      input: renderPrompt(patch, target, replacement),
       encoding: "utf8",
       maxBuffer: 1024 * 1024 * 20,
     },
@@ -66,7 +97,7 @@ export function heal(patch: Patch, piRoot: string, state: State): boolean {
     fs.writeFileSync(target, before);
     recordError(state, patch.id, reason);
     say(
-      `pi-patcher: ${patch.id} not healed. Inspect: pi --session ${sessionPath ?? "(no session)"}`,
+      `pi-patcher: ${label} not healed. Inspect: pi --session ${sessionPath ?? "(no session)"}`,
     );
     say(`Reason: ${reason}`);
     return false;
@@ -83,10 +114,10 @@ export function heal(patch: Patch, piRoot: string, state: State): boolean {
     );
 
   try {
-    nodeCheck(target);
+    validateTarget(target);
   } catch (error) {
     return fail(
-      `node --check failed: ${error instanceof Error ? error.message : String(error)}`,
+      `validation failed: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 
@@ -99,24 +130,49 @@ export function heal(patch: Patch, piRoot: string, state: State): boolean {
   )
     return fail("edits did not produce a derivable patch");
 
-  rewriteFirstReplacement(patch, derived);
+  rewriteReplacement(patch, fi, ri, derived);
   recordHealed(state, patch.id, sha(after));
   say(
-    `pi-patcher: ${patch.id} healed. Session: pi --session ${sessionPath ?? "(no session)"}`,
+    `pi-patcher: ${label} healed. Session: pi --session ${sessionPath ?? "(no session)"}`,
   );
   return true;
 }
 
-function renderPrompt(patch: Patch, targetPath: string): string {
-  const template = fs.readFileSync(
-    path.join(PROMPTS_DIR, "heal.md"),
-    "utf8",
-  );
+function healLabel(patch: Patch, fi: number, ri: number): string {
+  const file = patch.spec.files[fi]!;
+  if (patch.spec.files.length === 1 && file.replacements.length === 1)
+    return patch.id;
+  return `${patch.id} (${file.target}#${ri})`;
+}
+
+function renderPrompt(
+  patch: Patch,
+  targetPath: string,
+  replacement: Replacement,
+): string {
+  const template = fs.readFileSync(path.join(PROMPTS_DIR, "heal.md"), "utf8");
   return template
     .replaceAll("{{patch_id}}", patch.id)
     .replaceAll("{{intent}}", patch.intent.trim())
-    .replaceAll("{{spec}}", JSON.stringify(patch.spec, null, 2))
-    .replaceAll("{{target_path}}", targetPath);
+    .replaceAll(
+      "{{replacement}}",
+      JSON.stringify(
+        { oldText: replacement.oldText, newText: replacement.newText },
+        null,
+        2,
+      ),
+    )
+    .replaceAll("{{target_path}}", targetPath)
+    .replaceAll("{{validation_hint}}", validationHint(targetPath));
+}
+
+function validationHint(targetPath: string): string {
+  const ext = path.extname(targetPath).toLowerCase();
+  if (ext === ".js" || ext === ".mjs" || ext === ".cjs")
+    return `The target file must pass \`node --check ${targetPath}\` after edits.`;
+  if (ext === ".json")
+    return `The target file must remain valid JSON after edits.`;
+  return `The target file must remain syntactically valid for its language; no automatic check is run for this file type.`;
 }
 
 function latestSessionFile(dir: string): string | undefined {
@@ -129,12 +185,16 @@ function latestSessionFile(dir: string): string | undefined {
     .at(-1);
 }
 
-function rewriteFirstReplacement(patch: Patch, derived: Replacement): void {
+function rewriteReplacement(
+  patch: Patch,
+  fi: number,
+  ri: number,
+  derived: Replacement,
+): void {
   const newSpec = structuredClone(patch.spec);
-  const first = newSpec.files[0]!;
-  first.replacements = [
-    { ...(first.replacements[0] ?? { oldText: "", newText: "" }), ...derived },
-  ];
+  const file = newSpec.files[fi]!;
+  const old = file.replacements[ri]!;
+  file.replacements[ri] = { ...old, ...derived };
   saveSpec(patch, newSpec);
 }
 

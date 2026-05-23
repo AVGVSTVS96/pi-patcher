@@ -186,7 +186,7 @@ export function statusOf(patch: Patch, piRoot: string): Status {
   return "applied";
 }
 
-function classify(r: Replacement, text: string): Status {
+export function classify(r: Replacement, text: string): Status {
   const newCount = count(text, r.newText);
   if (newCount === 1) return "applied";
   if (newCount > 1) return "drift";
@@ -231,7 +231,7 @@ function runEdits(
       if (text === original) continue;
       if (!originals.has(target)) originals.set(target, original);
       fs.writeFileSync(target, text);
-      nodeCheck(target);
+      validateTarget(target);
       lastSha = sha(text);
     }
   } catch (error) {
@@ -255,8 +255,22 @@ export function backupFile(target: string, version: string): string {
   return dst;
 }
 
-export function nodeCheck(target: string): void {
-  execFileSync(process.execPath, ["--check", target], { stdio: "pipe" });
+/**
+ * Validate the target file after an edit, choosing the validator by file
+ * extension. Throws on failure. For unknown extensions there's no automatic
+ * validator — the patch either applied (string replace succeeded) or it
+ * didn't. This is what lets pi-patcher edit markdown prompts, plain text,
+ * etc., not just compiled JS.
+ */
+export function validateTarget(target: string): void {
+  const ext = path.extname(target).toLowerCase();
+  if (ext === ".js" || ext === ".mjs" || ext === ".cjs") {
+    execFileSync(process.execPath, ["--check", target], { stdio: "pipe" });
+    return;
+  }
+  if (ext === ".json") {
+    JSON.parse(fs.readFileSync(target, "utf8"));
+  }
 }
 
 export function count(haystack: string, needle: string): number {

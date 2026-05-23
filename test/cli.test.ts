@@ -177,6 +177,108 @@ describe("pi-patcher CLI", () => {
     expect(state.patches["bootstrap-hook"].lastError).toBe("upstream moved the update flow");
   });
 
+  test("heal handles multi-replacement patches per-entry, leaving applied ones alone", () => {
+    // The file already has replacement[0] applied. Replacement[1]'s old/new
+    // text is nowhere to be found — drift. Heal must touch only [1] and
+    // rewrite only [1] in the spec.
+    const fileText =
+      `console.log("alpha-applied");\n` +
+      `console.log("beta-drifted-zone");\n`;
+    const ctx = makeFakePi({
+      // Use the canonical pi file so the bundled bootstrap-hook applies
+      // cleanly via mechanical apply and doesn't try to heal in this test.
+      packageManagerCli: originalPackageManagerCli,
+      // On heal: write a file where alpha stays + the drifted zone becomes the
+      // healed beta. The derive step will recover the spec for [1].
+      healScript: [
+        "PROMPT=$(cat)",
+        'TARGET=$(printf "%s" "$PROMPT" | sed -n "s/^Target file: //p" | head -n1)',
+        'printf "===PLAN===\\nrewrite beta zone\\n===END===\\n"',
+        `printf 'console.log("alpha-applied");\\nconsole.log("beta-healed");\\n' > "$TARGET"`,
+        "exit 0",
+      ].join("\n"),
+    });
+
+    const targetRel = "dist/multi.js";
+    fs.writeFileSync(path.join(ctx.piRoot, "dist", "multi.js"), fileText);
+    writePatch(ctx, "multi", {
+      files: [
+        {
+          target: targetRel,
+          replacements: [
+            {
+              oldText: 'console.log("alpha-original");\n',
+              newText: 'console.log("alpha-applied");\n',
+            },
+            {
+              oldText: 'console.log("beta-original");\n',
+              newText: 'console.log("beta-applied");\n',
+            },
+          ],
+        },
+      ],
+    });
+
+    const result = runCli(ctx, ["reconcile"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("multi (dist/multi.js#1) drifted");
+    expect(result.stdout).toContain("multi (dist/multi.js#1) healed");
+    // [0] never logs because it was already applied.
+    expect(result.stdout).not.toContain("multi (dist/multi.js#0)");
+
+    const patched = fs.readFileSync(
+      path.join(ctx.piRoot, "dist", "multi.js"),
+      "utf8",
+    );
+    expect(patched).toContain('console.log("alpha-applied");');
+    expect(patched).toContain('console.log("beta-healed");');
+
+    // Only [1] should have its spec rewritten; [0] must be untouched.
+    const spec = JSON.parse(
+      fs.readFileSync(
+        path.join(ctx.home, ".pi", "patches", "multi", "spec.json"),
+        "utf8",
+      ),
+    );
+    expect(spec.files[0].replacements[0].newText).toBe(
+      'console.log("alpha-applied");\n',
+    );
+    expect(spec.files[0].replacements[1].newText).toContain("beta-healed");
+  });
+
+  test("text-only targets (.md) apply without validation", () => {
+    // .md gets no automatic validator — the patch either applies or it
+    // doesn't. Proves we no longer hard-require node --check on every target.
+    const ctx = makeFakePi({ packageManagerCli: originalPackageManagerCli });
+    const promptPath = path.join(ctx.piRoot, "dist", "system-prompt.md");
+    fs.writeFileSync(
+      promptPath,
+      "You are a coding agent.\nBe terse and accurate.\n",
+    );
+    writePatch(ctx, "prompt-tweak", {
+      files: [
+        {
+          target: "dist/system-prompt.md",
+          replacements: [
+            {
+              oldText: "Be terse and accurate.\n",
+              newText: "Be terse and accurate. Always use British spelling.\n",
+            },
+          ],
+        },
+      ],
+    });
+
+    const result = runCli(ctx, ["reconcile"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("pi-patcher: applied prompt-tweak");
+    expect(fs.readFileSync(promptPath, "utf8")).toBe(
+      "You are a coding agent.\nBe terse and accurate. Always use British spelling.\n",
+    );
+  });
+
   test("a spec with empty newText is rejected at load time", () => {
     const ctx = makeFakePi({ packageManagerCli: originalPackageManagerCli });
     writePatch(ctx, "deletion-attempt", {
