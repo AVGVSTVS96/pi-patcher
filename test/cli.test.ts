@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { deriveSingleReplacement } from "../src/patches.js";
+import { derivePatch } from "../src/patch/edits.js";
 
 const repoRoot = path.resolve(import.meta.dir, "..");
 const cleanups: string[] = [];
@@ -25,6 +25,20 @@ describe("pi-patcher CLI", () => {
     expect(patched).toContain('import("node:child_process")');
     expect(patched).toContain('spawnSync("pi-patcher", ["reconcile", "--after-update"]');
     expect(patched).not.toContain('require("child_process")');
+  });
+
+  test("the bundled dist/cli.js artifact runs the same happy path", () => {
+    // Guards against bundler regressions: bad import.meta.url resolution,
+    // externalized dynamic imports, dropped chmod +x, etc.
+    const ctx = makeFakePi({ packageManagerCli: originalPackageManagerCli });
+
+    const result = runBundledCli(ctx, ["reconcile"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("pi-patcher: applied bootstrap-hook");
+    expect(fs.readFileSync(ctx.packageManagerCliPath, "utf8")).toContain(
+      'import("node:child_process")',
+    );
   });
 
   test("remove tombstones a patch and the next reconcile reverses it", () => {
@@ -74,12 +88,12 @@ describe("pi-patcher CLI", () => {
   });
 });
 
-describe("deriveSingleReplacement", () => {
+describe("derivePatch", () => {
   test("derives a minimal line-level replacement", () => {
     const before = "one\nfunction value() { return 1; }\ntwo\n";
     const after = "one\nfunction value() { return 2; }\ntwo\n";
 
-    expect(deriveSingleReplacement(before, after)).toEqual({
+    expect(derivePatch(before, after)).toEqual({
       oldText: "function value() { return 1; }\n",
       newText: "function value() { return 2; }\n",
     });
@@ -124,8 +138,21 @@ function makeFakePi({
 }
 
 function runCli(ctx: FakePiContext, args: string[]) {
+  return spawnCli(ctx, [process.execPath, "run", "src/cli/index.ts", ...args]);
+}
+
+function runBundledCli(ctx: FakePiContext, args: string[]) {
+  const dist = path.join(repoRoot, "dist", "cli.js");
+  if (!fs.existsSync(dist))
+    throw new Error(
+      `dist/cli.js not found. The 'test' script runs 'bun run build' first; run that manually if invoking 'bun test' directly.`,
+    );
+  return spawnCli(ctx, ["node", dist, ...args]);
+}
+
+function spawnCli(ctx: FakePiContext, cmd: string[]) {
   const result = Bun.spawnSync({
-    cmd: [process.execPath, "run", "src/cli.ts", ...args],
+    cmd,
     cwd: repoRoot,
     env: {
       ...process.env,
