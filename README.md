@@ -22,7 +22,9 @@ Pi patches pi. The patch maintainer is the agent.
 npm install -g pi-patcher
 ```
 
-The postinstall runs `pi-patcher reconcile`, which patches a one-line hook into pi's update path so that every subsequent `pi update` re-applies your patches. The hook itself is just another pi-patcher patch — self-managed and self-healed when necessary.
+> **Heads up:** the postinstall step runs `pi-patcher reconcile`, which edits files inside your globally-installed `pi`. That's the whole point of the tool, but it's worth knowing before you `npm install -g`. Every edit is backed up under `~/.pi/pi-patcher/backups/<piVersion>/` and is reversible via `pi-patcher remove`.
+
+The postinstall patches a one-line hook into pi's update path so that every subsequent `pi update` re-applies your patches. The hook itself is just another pi-patcher patch — self-managed and self-healed when necessary.
 
 ## Commands
 
@@ -71,6 +73,16 @@ Every session is saved and its path is logged; replay with `pi --session <path>`
 - **No deletion patches.** `newText === ""` is rejected at spec load. Replace the line with a comment or no-op instead.
 - **No AI revert.** `pi-patcher remove` won't ask the AI to undo a drifted patch; it exits non-zero and asks you to clean the file by hand, then retry.
 - **Heal runs one AI session per drifted replacement.** A multi-replacement patch where three replacements have drifted spawns three heal sessions in sequence.
+
+## Uninstalling
+
+```sh
+pi-patcher uninstall
+```
+
+Reverts every patch, deletes their folders, forgets state, then runs `npm uninstall -g pi-patcher`. One command, full cleanup. (If a custom patch has drifted, it's skipped with a message instead of failing — the file is already in a modified state you'd need to clean up by hand.)
+
+To *temporarily* disable pi-patcher without uninstalling, rename any patch directory to `_<id>`. The loader skips underscore-prefixed entries.
 
 ## Model configuration
 

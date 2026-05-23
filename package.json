@@ -18,8 +18,29 @@
     "dist",
     "prompts",
     "patches",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
+  "keywords": [
+    "pi",
+    "patch",
+    "patcher",
+    "self-healing",
+    "ai",
+    "agent",
+    "cli"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AVGVSTVS96/pi-patcher.git"
+  },
+  "bugs": {
+    "url": "https://github.com/AVGVSTVS96/pi-patcher/issues"
+  },
+  "homepage": "https://github.com/AVGVSTVS96/pi-patcher#readme",
+  "engines": {
+    "node": ">=18"
+  },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.5.0"

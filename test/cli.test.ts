@@ -279,6 +279,84 @@ describe("pi-patcher CLI", () => {
     );
   });
 
+  test("uninstall reverts every patch and invokes `npm uninstall -g pi-patcher`", () => {
+    const ctx = makeFakePi({ packageManagerCli: originalPackageManagerCli });
+    // Apply bootstrap-hook + a user patch.
+    fs.writeFileSync(path.join(ctx.piRoot, "dist", "extra.js"), "const x = 1;\n");
+    writePatch(ctx, "user-tweak", {
+      files: [
+        {
+          target: "dist/extra.js",
+          replacements: [{ oldText: "const x = 1;\n", newText: "const x = 2;\n" }],
+        },
+      ],
+    });
+    expect(runCli(ctx, ["reconcile"]).exitCode).toBe(0);
+
+    const result = runCli(ctx, ["uninstall"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("pi-patcher: reverted bootstrap-hook");
+    expect(result.stdout).toContain("pi-patcher: reverted user-tweak");
+    expect(result.stdout).toContain("npm uninstall -g pi-patcher");
+    // Fake npm shim prints this and exits 0.
+    expect(result.stdout).toContain("fake npm: uninstall -g pi-patcher");
+
+    // Files restored.
+    expect(fs.readFileSync(ctx.packageManagerCliPath, "utf8")).toBe(originalPackageManagerCli);
+    expect(fs.readFileSync(path.join(ctx.piRoot, "dist", "extra.js"), "utf8")).toBe(
+      "const x = 1;\n",
+    );
+
+    // Patch folders gone, state forgotten.
+    const patchesDir = path.join(ctx.home, ".pi", "patches");
+    expect(fs.existsSync(path.join(patchesDir, "bootstrap-hook"))).toBe(false);
+    expect(fs.existsSync(path.join(patchesDir, "user-tweak"))).toBe(false);
+    const state = JSON.parse(
+      fs.readFileSync(path.join(ctx.home, ".pi", "pi-patcher", "state.json"), "utf8"),
+    );
+    expect(state.patches["bootstrap-hook"]).toBeUndefined();
+    expect(state.patches["user-tweak"]).toBeUndefined();
+  });
+
+  test("uninstall skips drifted patches with a warning, still succeeds, still uninstalls", () => {
+    // bootstrap-hook applies cleanly via canonical CLI; a separate user
+    // patch is in drift (target file rewritten upstream).
+    const ctx = makeFakePi({ packageManagerCli: originalPackageManagerCli });
+    fs.writeFileSync(
+      path.join(ctx.piRoot, "dist", "drifted.js"),
+      'console.log("something else entirely");\n',
+    );
+    writePatch(ctx, "will-drift", {
+      files: [
+        {
+          target: "dist/drifted.js",
+          replacements: [
+            {
+              oldText: 'console.log("original");\n',
+              newText: 'console.log("patched");\n',
+            },
+          ],
+        },
+      ],
+    });
+
+    const result = runCli(ctx, ["uninstall"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("pi-patcher: skipped will-drift (drifted");
+    expect(result.stdout).toContain("with caveats");
+    expect(result.stdout).toContain("fake npm: uninstall -g pi-patcher");
+    // The drifted file is left untouched — we won't guess at what to revert.
+    expect(fs.readFileSync(path.join(ctx.piRoot, "dist", "drifted.js"), "utf8")).toBe(
+      'console.log("something else entirely");\n',
+    );
+    // But the patch folder is still gone.
+    expect(
+      fs.existsSync(path.join(ctx.home, ".pi", "patches", "will-drift")),
+    ).toBe(false);
+  });
+
   test("a spec with empty newText is rejected at load time", () => {
     const ctx = makeFakePi({ packageManagerCli: originalPackageManagerCli });
     writePatch(ctx, "deletion-attempt", {
@@ -346,6 +424,13 @@ function makeFakePi({
   fs.writeFileSync(
     path.join(binDir, "pi"),
     `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "pi 1.0.0"; exit 0; fi\nif [ "$1" = "-p" ]; then\n${healScript}\nfi\nprintf "unexpected pi args: %s\\n" "$*" >&2\nexit 1\n`,
+    { mode: 0o755 },
+  );
+  // Fake npm so `pi-patcher uninstall` doesn't try to mutate the user's
+  // real global packages during tests. Echoes its args and exits 0.
+  fs.writeFileSync(
+    path.join(binDir, "npm"),
+    `#!/bin/sh\nprintf "fake npm: %s\\n" "$*"\nexit 0\n`,
     { mode: 0o755 },
   );
 

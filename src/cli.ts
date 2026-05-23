@@ -1,6 +1,10 @@
 #!/usr/bin/env node
+import fs from "node:fs";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
 import {
   type Patch,
+  ROOT,
   allPatches,
   applyEdits,
   ensureLayout,
@@ -41,8 +45,51 @@ function main(argv: string[]): number {
       return cmdHeal(requireArg(rest[0], "heal <id>"));
     case "remove":
       return cmdRemove(requireArg(rest[0], "remove <id>"));
+    case "uninstall":
+      return cmdUninstall();
+    case "help":
+    case "--help":
+    case "-h":
+      console.log(helpText());
+      return 0;
+    case "version":
+    case "--version":
+    case "-v":
+      console.log(version());
+      return 0;
     default:
-      throw new Error(`Unknown command: ${cmd}`);
+      console.error(`pi-patcher: unknown command: ${cmd}`);
+      console.error(`Run \`pi-patcher --help\` for usage.`);
+      return 1;
+  }
+}
+
+function helpText(): string {
+  return `pi-patcher ${version()}
+Self-healing patches for pi.
+
+Usage:
+  pi-patcher                  Same as reconcile
+  pi-patcher reconcile        Apply pending patches; heal drifted ones
+  pi-patcher list             Show status and most recent heal session
+  pi-patcher heal <id>        Re-anchor a drifted patch via AI
+  pi-patcher remove <id>      Revert edits and delete the patch folder
+  pi-patcher uninstall        Revert every patch and uninstall the npm package
+
+  pi-patcher --help, -h       Show this help
+  pi-patcher --version, -v    Show version
+
+Docs: https://github.com/AVGVSTVS96/pi-patcher`;
+}
+
+function version(): string {
+  try {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(ROOT, "package.json"), "utf8"),
+    ) as { version?: string };
+    return pkg.version ?? "unknown";
+  } catch {
+    return "unknown";
   }
 }
 
@@ -134,6 +181,59 @@ function cmdRemove(id: string): number {
     console.log(`pi-patcher: removed ${id}`);
     return 0;
   });
+}
+
+/**
+ * `pi-patcher uninstall` — the single user-facing command for tearing
+ * pi-patcher down. Reverts every applied patch (skipping drifted ones,
+ * since the user has already modified those files), deletes every patch
+ * folder, forgets state, then runs `npm uninstall -g pi-patcher`.
+ *
+ * Drift is not a hard error: if the user has a custom patch whose target
+ * file has been rewritten upstream, we can't safely revert it. We delete
+ * the patch folder anyway and tell the user. They explicitly asked to
+ * uninstall; we shouldn't block on a broken patch.
+ */
+function cmdUninstall(): number {
+  const cleanupExit = withSession((piRoot, state) => {
+    let issues = 0;
+    for (const patch of allPatches()) {
+      try {
+        const status = statusOf(patch, piRoot);
+        if (status === "applied") {
+          revertEdits(patch, piRoot);
+          console.log(`pi-patcher: reverted ${patch.id}`);
+        } else if (status === "drift") {
+          issues++;
+          console.log(
+            `pi-patcher: skipped ${patch.id} (drifted; file already modified upstream, left as-is)`,
+          );
+        }
+      } catch (error) {
+        issues++;
+        console.log(
+          `pi-patcher: ${patch.id} revert failed: ${msg(error)} (continuing)`,
+        );
+      }
+      removePatchDir(patch.id);
+      delete state.patches[patch.id];
+    }
+    console.log(
+      issues
+        ? `pi-patcher: removed ${issues === 1 ? "1 patch with caveats" : `patches (${issues} with caveats)`}; running \`npm uninstall -g pi-patcher\`…`
+        : `pi-patcher: all patches cleaned up; running \`npm uninstall -g pi-patcher\`…`,
+    );
+    return 0;
+  });
+  if (cleanupExit !== 0) return cleanupExit;
+
+  // Spawn npm. On Mac/Linux npm unlinks our binary while we're running;
+  // the inode persists until we exit, so this is safe.
+  const result = spawnSync("npm", ["uninstall", "-g", "pi-patcher"], {
+    stdio: "inherit",
+    shell: process.platform === "win32",
+  });
+  return result.status ?? 1;
 }
 
 // ── Session ──────────────────────────────────────────────────
