@@ -4,13 +4,13 @@
   "description": "Update-resilient self-healing patches for pi installs.",
   "type": "module",
   "bin": {
-    "pi-patcher": "./dist/cli.js"
+    "pi-patcher": "dist/cli.js"
   },
   "scripts": {
-    "dev": "bun run src/cli/index.ts",
+    "dev": "bun run src/cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun run build && bun test",
-    "build": "tsc --noEmit && bun build src/cli/index.ts --target=node --outfile=dist/cli.js && chmod +x dist/cli.js",
+    "build": "tsc --noEmit && bun build src/cli.ts --target=node --outfile=dist/cli.js && chmod +x dist/cli.js",
     "prepack": "bun run build",
     "postinstall": "node ./dist/cli.js reconcile || true"
   },

@@ -7,7 +7,7 @@
         {
           "anchorHint": "end of the pi self-update branch, immediately after Updated ${APP_NAME}",
           "oldText": "                    console.log(chalk.green(`Updated ${APP_NAME}`));\n",
-          "newText": "                    console.log(chalk.green(`Updated ${APP_NAME}`));\n                    try { (await import(\"node:child_process\")).spawnSync(\"pi-patcher\", [\"reconcile\", \"--after-update\"], { stdio: \"inherit\", shell: process.platform === \"win32\" }); } catch {}\n"
+          "newText": "                    console.log(chalk.green(`Updated ${APP_NAME}`));\n                    try { (await import(\"node:child_process\")).spawnSync(\"pi-patcher\", [\"reconcile\"], { stdio: \"inherit\", shell: process.platform === \"win32\" }); } catch {}\n"
         }
       ]
     }

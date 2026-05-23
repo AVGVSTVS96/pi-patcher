@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { derivePatch } from "../src/patch/edits.js";
+import { derivePatch } from "../src/patches.js";
 
 const repoRoot = path.resolve(import.meta.dir, "..");
 const cleanups: string[] = [];
@@ -14,7 +14,7 @@ afterEach(() => {
 });
 
 describe("pi-patcher CLI", () => {
-  test("reconcile applies the bundled ESM-safe update hook", () => {
+  test("reconcile applies the bundled ESM-safe update hook to fresh pi files", () => {
     const ctx = makeFakePi({ packageManagerCli: originalPackageManagerCli });
 
     const result = runCli(ctx, ["reconcile"]);
@@ -23,7 +23,8 @@ describe("pi-patcher CLI", () => {
     expect(result.stdout).toContain("pi-patcher: applied bootstrap-hook");
     const patched = fs.readFileSync(ctx.packageManagerCliPath, "utf8");
     expect(patched).toContain('import("node:child_process")');
-    expect(patched).toContain('spawnSync("pi-patcher", ["reconcile", "--after-update"]');
+    expect(patched).toContain('spawnSync("pi-patcher", ["reconcile"]');
+    expect(patched).not.toContain("--after-update");
     expect(patched).not.toContain('require("child_process")');
   });
 
@@ -41,51 +42,101 @@ describe("pi-patcher CLI", () => {
     );
   });
 
-  test("remove reverts and deletes the patch in one step", () => {
+  test("reconcile is idempotent across two invocations", () => {
+    const ctx = makeFakePi({ packageManagerCli: originalPackageManagerCli });
+
+    expect(runCli(ctx, ["reconcile"]).exitCode).toBe(0);
+    const afterFirst = fs.readFileSync(ctx.packageManagerCliPath, "utf8");
+
+    const second = runCli(ctx, ["reconcile"]);
+    expect(second.exitCode).toBe(0);
+    expect(fs.readFileSync(ctx.packageManagerCliPath, "utf8")).toBe(afterFirst);
+  });
+
+  test("remove reverts the patch, deletes the folder, and forgets state", () => {
     const ctx = makeFakePi({ packageManagerCli: originalPackageManagerCli });
     expect(runCli(ctx, ["reconcile"]).exitCode).toBe(0);
 
     const result = runCli(ctx, ["remove", "bootstrap-hook"]);
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("pi-patcher: reversed bootstrap-hook");
+    expect(result.stdout).toContain("pi-patcher: reverted bootstrap-hook");
     expect(result.stdout).toContain("pi-patcher: removed bootstrap-hook");
     expect(fs.readFileSync(ctx.packageManagerCliPath, "utf8")).toBe(originalPackageManagerCli);
+
     const patchesDir = path.join(ctx.home, ".pi", "patches");
     expect(fs.existsSync(path.join(patchesDir, "bootstrap-hook"))).toBe(false);
-    expect(fs.existsSync(path.join(patchesDir, "_bootstrap-hook"))).toBe(false);
     const state = JSON.parse(
       fs.readFileSync(path.join(ctx.home, ".pi", "pi-patcher", "state.json"), "utf8"),
     );
     expect(state.patches["bootstrap-hook"]).toBeUndefined();
   });
 
-  test("discovers patches in ~/.pi/agent/patches when the default is absent", () => {
-    // Add an extra unique line so agent-patch doesn't collide with the
-    // bundled bootstrap-hook (which also gets copied into agent/patches).
-    const cli = `async function update() {\n  console.log("starting");\n                    console.log(chalk.green(\`Updated \${APP_NAME}\`));\n}\n`;
-    const ctx = makeFakePi({ packageManagerCli: cli });
-    // Pre-create agent/patches BEFORE first CLI run so resolvePatchesDir()
-    // picks it up instead of defaulting to ~/.pi/patches.
-    writePatchAt(ctx, [".pi", "agent", "patches"], "agent-patch", {
-      target: "dist/package-manager-cli.js",
-      replacements: [
-        {
-          oldText: '  console.log("starting");\n',
-          newText: '  console.log("starting (agent-patch)");\n',
-        },
-      ],
-    });
+  test("remove on a never-applied patch deletes the folder cleanly", () => {
+    const ctx = makeFakePi({ packageManagerCli: originalPackageManagerCli });
+    // Loader needs to see it; reconcile would also apply it, so skip that.
+    // ensureLayout copies bundled patches in on first CLI invocation.
+    expect(runCli(ctx, ["list"]).exitCode).toBe(0);
+
+    const result = runCli(ctx, ["remove", "bootstrap-hook"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).not.toContain("reverted");
+    expect(result.stdout).toContain("pi-patcher: removed bootstrap-hook");
+    expect(fs.readFileSync(ctx.packageManagerCliPath, "utf8")).toBe(originalPackageManagerCli);
+  });
+
+  test("remove on a drifted patch fails non-zero and leaves the folder alone", () => {
+    const drifted = `async function update() {\n  console.log("upstream rewrote this area");\n}\n`;
+    const ctx = makeFakePi({ packageManagerCli: drifted });
+    // Trigger ensureLayout so the bundled patch shows up.
+    expect(runCli(ctx, ["list"]).exitCode).toBe(0);
+
+    const result = runCli(ctx, ["remove", "bootstrap-hook"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("drifted");
+    // File untouched, folder still present.
+    expect(fs.readFileSync(ctx.packageManagerCliPath, "utf8")).toBe(drifted);
+    expect(
+      fs.existsSync(path.join(ctx.home, ".pi", "patches", "bootstrap-hook")),
+    ).toBe(true);
+  });
+
+  test("after remove, the next reconcile re-installs the bundled patch", () => {
+    const ctx = makeFakePi({ packageManagerCli: originalPackageManagerCli });
+    expect(runCli(ctx, ["reconcile"]).exitCode).toBe(0);
+    expect(runCli(ctx, ["remove", "bootstrap-hook"]).exitCode).toBe(0);
+
+    // Simulate a subsequent `pi update`: file is fresh again.
+    fs.writeFileSync(ctx.packageManagerCliPath, originalPackageManagerCli);
+    const result = runCli(ctx, ["reconcile"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("pi-patcher: applied bootstrap-hook");
+    expect(
+      fs.existsSync(path.join(ctx.home, ".pi", "patches", "bootstrap-hook")),
+    ).toBe(true);
+  });
+
+  test("an _<id>/ directory is skipped (manual tombstone escape hatch)", () => {
+    const ctx = makeFakePi({ packageManagerCli: originalPackageManagerCli });
+    expect(runCli(ctx, ["reconcile"]).exitCode).toBe(0);
+
+    // User manually disables the bundled patch.
+    const patchesDir = path.join(ctx.home, ".pi", "patches");
+    fs.renameSync(
+      path.join(patchesDir, "bootstrap-hook"),
+      path.join(patchesDir, "_bootstrap-hook"),
+    );
+    // And restores the file by hand.
+    fs.writeFileSync(ctx.packageManagerCliPath, originalPackageManagerCli);
 
     const result = runCli(ctx, ["reconcile"]);
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("pi-patcher: applied agent-patch");
-    expect(fs.readFileSync(ctx.packageManagerCliPath, "utf8")).toContain(
-      'console.log("starting (agent-patch)")',
-    );
-    // Default location should remain unused.
-    expect(fs.existsSync(path.join(ctx.home, ".pi", "patches"))).toBe(false);
+    expect(result.stdout).not.toContain("applied bootstrap-hook");
+    expect(fs.readFileSync(ctx.packageManagerCliPath, "utf8")).toBe(originalPackageManagerCli);
   });
 
   test("a clean-apply syntax failure rolls the target file back", () => {
@@ -93,8 +144,12 @@ describe("pi-patcher CLI", () => {
     const badTarget = path.join(ctx.piRoot, "dist", "bad.js");
     fs.writeFileSync(badTarget, "const x = 1;\n");
     writePatch(ctx, "bad-syntax", {
-      target: "dist/bad.js",
-      replacements: [{ oldText: "const x = 1;\n", newText: "const = ;\n" }],
+      files: [
+        {
+          target: "dist/bad.js",
+          replacements: [{ oldText: "const x = 1;\n", newText: "const = ;\n" }],
+        },
+      ],
     });
 
     const result = runCli(ctx, ["reconcile"]);
@@ -104,7 +159,7 @@ describe("pi-patcher CLI", () => {
     expect(fs.readFileSync(badTarget, "utf8")).toBe("const x = 1;\n");
   });
 
-  test("an aborted heal is saved in state and exits non-zero", () => {
+  test("an aborted heal during reconcile is saved in state", () => {
     const drifted = `async function update() {\n  console.log("updated pi");\n}\n`;
     const ctx = makeFakePi({
       packageManagerCli: drifted,
@@ -121,6 +176,28 @@ describe("pi-patcher CLI", () => {
     );
     expect(state.patches["bootstrap-hook"].lastError).toBe("upstream moved the update flow");
   });
+
+  test("a spec with empty newText is rejected at load time", () => {
+    const ctx = makeFakePi({ packageManagerCli: originalPackageManagerCli });
+    writePatch(ctx, "deletion-attempt", {
+      files: [
+        {
+          target: "dist/package-manager-cli.js",
+          replacements: [
+            {
+              oldText: '                    console.log(chalk.green(`Updated ${APP_NAME}`));\n',
+              newText: "",
+            },
+          ],
+        },
+      ],
+    });
+
+    const result = runCli(ctx, ["list"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("empty newText");
+  });
 });
 
 describe("derivePatch", () => {
@@ -135,6 +212,7 @@ describe("derivePatch", () => {
   });
 });
 
+// ── Fake pi environment ──────────────────────────────────────
 type FakePiContext = {
   home: string;
   piRoot: string;
@@ -173,7 +251,7 @@ function makeFakePi({
 }
 
 function runCli(ctx: FakePiContext, args: string[]) {
-  return spawnCli(ctx, [process.execPath, "run", "src/cli/index.ts", ...args]);
+  return spawnCli(ctx, [process.execPath, "run", "src/cli.ts", ...args]);
 }
 
 function runBundledCli(ctx: FakePiContext, args: string[]) {
@@ -206,16 +284,7 @@ function spawnCli(ctx: FakePiContext, cmd: string[]) {
 }
 
 function writePatch(ctx: FakePiContext, id: string, spec: unknown) {
-  writePatchAt(ctx, [".pi", "patches"], id, spec);
-}
-
-function writePatchAt(
-  ctx: FakePiContext,
-  segments: string[],
-  id: string,
-  spec: unknown,
-) {
-  const dir = path.join(ctx.home, ...segments, id);
+  const dir = path.join(ctx.home, ".pi", "patches", id);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "intent.md"), `test patch ${id}\n`);
   fs.writeFileSync(path.join(dir, "spec.json"), `${JSON.stringify(spec, null, 2)}\n`);
