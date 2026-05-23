@@ -22,7 +22,7 @@ Pi patches pi. The patch maintainer is the agent.
 npm install -g pi-patcher
 ```
 
-Postinstall runs `pi-patcher reconcile`, which patches a one-line hook into pi's update path and applies any patches defined in `~/.pi/pi-patcher/patches/`. The `pi-update` patch is self-managed and self-healed when necessary.
+Postinstall runs `pi-patcher reconcile`, which patches a one-line hook into pi's update path and applies any patches defined in `~/.pi/patches/`. The `pi-update` patch is self-managed and self-healed when necessary.
 
 ## Commands
 
@@ -31,24 +31,29 @@ pi-patcher              # reconcile
 pi-patcher reconcile    # apply / reverse / heal everything
 pi-patcher list         # show patch state + latest heal session
 pi-patcher heal <id>    # force-heal one patch
-pi-patcher remove <id>  # tombstone a patch (reversed on next reconcile)
+pi-patcher remove <id>  # reverse and delete a patch
 ```
-
-<!-- TODO: `remove` should actively remove the patch, not wait for next reconcile -->
 
 ## Writing a patch
 
-A patch is just a folder in `~/.pi/pi-patcher/patches/` with: <!-- TODO: move patches to `~/.pi/patches` -->
+A patch is just a folder in `~/.pi/patches/` with:
 
 ```text
-~/.pi/pi-patcher/patches/<id>/
+~/.pi/patches/<id>/
   intent.md     # what the patch does, and why
   spec.json     # { files: [{ target, replacements: [{ oldText, newText }] }] }
 ```
 
 `intent.md` ensures the LLM understands the patch before self-healing.
 
-To remove a patch, rename the folder to `_<id>`. Next reconcile reverses it.
+`pi-patcher remove <id>` is the normal way to remove a patch — it reverses the edits and deletes the folder in one step. If a revert fails (e.g. drift), the folder is left as `_<id>` and you can retry with `pi-patcher reconcile`. You can also rename the folder to `_<id>` manually to defer the revert until the next reconcile.
+
+### Where patches live
+
+- Default: `~/.pi/patches/`
+- Also recognized: `~/.pi/agent/patches/` (if the default doesn't exist)
+
+Move the folder between the two locations if you prefer; pi-patcher will follow.
 
 ## How healing works
 
@@ -78,12 +83,12 @@ bun run build
 ## Layout
 
 ```text
-~/.pi/pi-patcher/
-  patches/          # your patches (active and _tombstoned)
-  backups/<ver>/    # pre-edit copies, keyed by pi version
-  heal-sessions/    # one dir per heal attempt
-  logs/             # reconcile.log
-  state.json        # last-applied / last-healed / last-error per patch
+~/.pi/patches/        # your patches (user-authored)
+~/.pi/pi-patcher/     # tool-internal runtime data
+  backups/<ver>/      # pre-edit copies, keyed by pi version
+  heal-sessions/      # one dir per heal attempt
+  logs/               # reconcile.log
+  state.json          # last-applied / last-healed / last-error per patch
 ```
 
 ## License

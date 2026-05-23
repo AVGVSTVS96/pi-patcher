@@ -9,7 +9,16 @@ export const ROOT = path.resolve(
   "..",
 );
 export const HOME = path.join(os.homedir(), ".pi", "pi-patcher");
-export const PATCHES_DIR = path.join(HOME, "patches");
+
+/**
+ * User-authored patches.
+ *
+ * Default: `~/.pi/patches/`.
+ * Also recognized: `~/.pi/agent/patches/` (if the default doesn't exist and
+ * the agent path does). Users can `mv` between the two; pi-patcher will
+ * follow. If neither exists yet, the default is used and created.
+ */
+export const PATCHES_DIR = resolvePatchesDir();
 export const LOGS = path.join(HOME, "logs");
 export const BACKUPS = path.join(HOME, "backups");
 export const HEAL_SESSIONS = path.join(HOME, "heal-sessions");
@@ -37,6 +46,15 @@ export function ensureLayout(): void {
       copyDir(path.join(BUNDLED_PATCHES, entry.name), active);
     }
   }
+}
+
+function resolvePatchesDir(): string {
+  const piDir = path.join(os.homedir(), ".pi");
+  const primary = path.join(piDir, "patches");
+  const alternate = path.join(piDir, "agent", "patches");
+  if (fs.existsSync(primary)) return primary;
+  if (fs.existsSync(alternate)) return alternate;
+  return primary;
 }
 
 function copyDir(src: string, dst: string): void {

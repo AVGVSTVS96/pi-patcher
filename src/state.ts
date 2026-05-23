@@ -91,6 +91,10 @@ export function clearError(state: State, id: string): void {
   delete entryFor(state, id).lastError;
 }
 
+export function forgetPatch(state: State, id: string): void {
+  delete state.patches[id];
+}
+
 // ── Readers ──────────────────────────────────────────────────
 export function patchError(state: State, id: string): string | undefined {
   return state.patches[id]?.lastError;

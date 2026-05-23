@@ -1,9 +1,14 @@
 import { withSession } from "../session.js";
-import { allPatches, loadPatch, markTombstoned } from "../patch/io.js";
+import {
+  allPatches,
+  deletePatch,
+  loadPatch,
+  markTombstoned,
+} from "../patch/io.js";
 import { reconcile } from "../patch/reconcile.js";
 import { heal } from "../patch/operations.js";
 import { statusOf } from "../patch/status.js";
-import { lastSession, recordError } from "../state.js";
+import { forgetPatch, lastSession, recordError } from "../state.js";
 import { say, errorMessage } from "../log.js";
 
 export function cmdReconcile(args: string[]): number {
@@ -42,6 +47,15 @@ export function cmdList(): number {
 }
 
 export function cmdRemove(id: string): number {
-  markTombstoned(id);
-  return 0;
+  // Active remove = tombstone + reconcile (which reverts) + delete + forget.
+  // If reconcile throws, the tombstone stays in place and the next call to
+  // `pi-patcher reconcile` will retry the revert.
+  return withSession((ctx) => {
+    markTombstoned(id);
+    reconcile(loadPatch(id), ctx);
+    deletePatch(id);
+    forgetPatch(ctx.state, id);
+    say(`pi-patcher: removed ${id}`);
+    return 0;
+  });
 }

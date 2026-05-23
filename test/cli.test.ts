@@ -41,16 +41,51 @@ describe("pi-patcher CLI", () => {
     );
   });
 
-  test("remove tombstones a patch and the next reconcile reverses it", () => {
+  test("remove reverts and deletes the patch in one step", () => {
     const ctx = makeFakePi({ packageManagerCli: originalPackageManagerCli });
-
     expect(runCli(ctx, ["reconcile"]).exitCode).toBe(0);
-    expect(runCli(ctx, ["remove", "bootstrap-hook"]).exitCode).toBe(0);
-    const result = runCli(ctx, ["reconcile"]);
+
+    const result = runCli(ctx, ["remove", "bootstrap-hook"]);
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("pi-patcher: reversed bootstrap-hook");
+    expect(result.stdout).toContain("pi-patcher: removed bootstrap-hook");
     expect(fs.readFileSync(ctx.packageManagerCliPath, "utf8")).toBe(originalPackageManagerCli);
+    const patchesDir = path.join(ctx.home, ".pi", "patches");
+    expect(fs.existsSync(path.join(patchesDir, "bootstrap-hook"))).toBe(false);
+    expect(fs.existsSync(path.join(patchesDir, "_bootstrap-hook"))).toBe(false);
+    const state = JSON.parse(
+      fs.readFileSync(path.join(ctx.home, ".pi", "pi-patcher", "state.json"), "utf8"),
+    );
+    expect(state.patches["bootstrap-hook"]).toBeUndefined();
+  });
+
+  test("discovers patches in ~/.pi/agent/patches when the default is absent", () => {
+    // Add an extra unique line so agent-patch doesn't collide with the
+    // bundled bootstrap-hook (which also gets copied into agent/patches).
+    const cli = `async function update() {\n  console.log("starting");\n                    console.log(chalk.green(\`Updated \${APP_NAME}\`));\n}\n`;
+    const ctx = makeFakePi({ packageManagerCli: cli });
+    // Pre-create agent/patches BEFORE first CLI run so resolvePatchesDir()
+    // picks it up instead of defaulting to ~/.pi/patches.
+    writePatchAt(ctx, [".pi", "agent", "patches"], "agent-patch", {
+      target: "dist/package-manager-cli.js",
+      replacements: [
+        {
+          oldText: '  console.log("starting");\n',
+          newText: '  console.log("starting (agent-patch)");\n',
+        },
+      ],
+    });
+
+    const result = runCli(ctx, ["reconcile"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("pi-patcher: applied agent-patch");
+    expect(fs.readFileSync(ctx.packageManagerCliPath, "utf8")).toContain(
+      'console.log("starting (agent-patch)")',
+    );
+    // Default location should remain unused.
+    expect(fs.existsSync(path.join(ctx.home, ".pi", "patches"))).toBe(false);
   });
 
   test("a clean-apply syntax failure rolls the target file back", () => {
@@ -171,7 +206,16 @@ function spawnCli(ctx: FakePiContext, cmd: string[]) {
 }
 
 function writePatch(ctx: FakePiContext, id: string, spec: unknown) {
-  const dir = path.join(ctx.home, ".pi", "pi-patcher", "patches", id);
+  writePatchAt(ctx, [".pi", "patches"], id, spec);
+}
+
+function writePatchAt(
+  ctx: FakePiContext,
+  segments: string[],
+  id: string,
+  spec: unknown,
+) {
+  const dir = path.join(ctx.home, ...segments, id);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "intent.md"), `test patch ${id}\n`);
   fs.writeFileSync(path.join(dir, "spec.json"), `${JSON.stringify(spec, null, 2)}\n`);

@@ -44,7 +44,12 @@ export function markTombstoned(id: string): void {
   const dst = path.join(PATCHES_DIR, `_${id}`);
   if (!fs.existsSync(src)) throw new Error(`No active patch named ${id}`);
   fs.renameSync(src, dst);
-  console.log(`Tombstoned ${id}. It will be reversed on next reconcile.`);
+}
+
+export function deletePatch(id: string): void {
+  ensureLayout();
+  fs.rmSync(path.join(PATCHES_DIR, id), { recursive: true, force: true });
+  fs.rmSync(path.join(PATCHES_DIR, `_${id}`), { recursive: true, force: true });
 }
 
 // ── Internal ─────────────────────────────────────────────────
