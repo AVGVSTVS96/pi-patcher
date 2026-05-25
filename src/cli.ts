@@ -9,6 +9,7 @@ import {
   applyEdits,
   ensureLayout,
   findPiRoot,
+  installBundledPatches,
   loadPatch,
   removePatchDir,
   revertEdits,
@@ -37,6 +38,8 @@ try {
 function main(argv: string[]): number {
   const [cmd = "reconcile", ...rest] = argv;
   switch (cmd) {
+    case "init":
+      return cmdInit();
     case "reconcile":
       return cmdReconcile();
     case "list":
@@ -69,6 +72,7 @@ function helpText(): string {
 Self-healing patches for pi.
 
 Usage:
+  pi-patcher init             Install bundled patches and wire into \`pi update\`
   pi-patcher                  Same as reconcile
   pi-patcher reconcile        Apply pending patches; heal drifted ones
   pi-patcher list             Show status and most recent heal session
@@ -79,6 +83,7 @@ Usage:
   pi-patcher --help, -h       Show this help
   pi-patcher --version, -v    Show version
 
+First-run flow: \`npm install -g pi-patcher && pi-patcher init\`.
 Docs: https://github.com/AVGVSTVS96/pi-patcher`;
 }
 
@@ -180,6 +185,39 @@ function cmdRemove(id: string): number {
     forgetPatch(state, id);
     console.log(`pi-patcher: removed ${id}`);
     return 0;
+  });
+}
+
+/**
+ * `pi-patcher init` — the single user-facing command for opting into
+ * pi-patcher's modifications to your pi install. Copies the bundled
+ * patches (currently just `bootstrap-hook`) into `~/.pi/patches/`, then
+ * applies them. Idempotent: safe to re-run after upgrades to pick up
+ * newly-bundled patches.
+ *
+ * No `postinstall` hook runs this automatically — we explicitly want the
+ * user to opt in to mutating their pi install.
+ */
+function cmdInit(): number {
+  return withSession((piRoot, state) => {
+    installBundledPatches();
+    let failed = 0;
+    for (const patch of allPatches()) {
+      try {
+        reconcileOne(patch, piRoot, state);
+      } catch (error) {
+        failed++;
+        const message = msg(error);
+        recordError(state, patch.id, message);
+        console.log(`pi-patcher: ${patch.id} failed: ${message}`);
+      }
+    }
+    if (!failed) {
+      console.log("");
+      console.log("pi-patcher is wired into pi update.");
+      console.log("To remove cleanly later, run: pi-patcher uninstall");
+    }
+    return failed ? 1 : 0;
   });
 }
 

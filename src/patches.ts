@@ -42,10 +42,26 @@ export type Patch = {
 export type Status = "applied" | "pending" | "drift";
 
 // ── Layout / discovery ───────────────────────────────────────
+/**
+ * Create the runtime directories pi-patcher needs (`~/.pi/patches/` for
+ * user-authored patches, `~/.pi/pi-patcher/` for state, backups, and heal
+ * sessions). This does NOT install bundled patches — that's an explicit
+ * opt-in via `pi-patcher init`, so plain `npm install -g pi-patcher`
+ * never silently mutates the user's pi install.
+ */
 export function ensureLayout(): void {
   for (const dir of [PATCHES_DIR, BACKUPS, HEAL_SESSIONS])
     fs.mkdirSync(dir, { recursive: true });
+}
 
+/**
+ * Copy any bundled patches into `~/.pi/patches/`. Idempotent: existing
+ * patches (and their `_<id>/` tombstones) are left alone, so re-running
+ * `init` after an upgrade picks up newly-bundled patches without
+ * clobbering user state. Called only by `pi-patcher init`.
+ */
+export function installBundledPatches(): void {
+  ensureLayout();
   if (!fs.existsSync(BUNDLED_PATCHES)) return;
   for (const entry of fs.readdirSync(BUNDLED_PATCHES, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;

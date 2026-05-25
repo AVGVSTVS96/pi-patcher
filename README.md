@@ -2,7 +2,7 @@
 
 Self-healing patches for [pi](https://github.com/earendil-works/pi-coding-agent).
 
-Want to modify `pi` but your changes require a patch? Use `pi-patcher` to keep small source patches applied across every `pi update`. When a patch breaks because pi changed, `pi-patcher` shells out to pi itself to re-anchor the edit.
+Want to modify `pi` but your changes require a patch? Use `pi-patcher` to keep source patches applied across every `pi update`. When patching fails due to updates to target files, `pi-patcher` uses `pi` to self-heal: the AI updates the patch file for the new code and applies it.
 
 ## The idea
 
@@ -20,25 +20,27 @@ Pi patches pi. The patch maintainer is the agent.
 
 ```sh
 npm install -g pi-patcher
+pi-patcher init
 ```
 
-> **Heads up:** the postinstall step runs `pi-patcher reconcile`, which edits files inside your globally-installed `pi`. That's the whole point of the tool, but it's worth knowing before you `npm install -g`. Every edit is backed up under `~/.pi/pi-patcher/backups/<piVersion>/` and is reversible via `pi-patcher remove`.
-
-The postinstall patches a one-line hook into pi's update path so that every subsequent `pi update` re-applies your patches. The hook itself is just another pi-patcher patch — self-managed and self-healed when necessary.
+`pi-patcher init` copies the bundled `bootstrap-hook` patch into `~/.pi/patches/` and applies it, wiring `pi-patcher reconcile` into the end of `pi update` so your patches are re-applied automatically on every future update. Every edit is backed up under `~/.pi/pi-patcher/backups/<piVersion>/` and is reversible via `pi-patcher remove` or `pi-patcher uninstall`.
 
 ## Commands
 
 ```sh
-pi-patcher              # same as reconcile
+pi-patcher init         # one-time setup: install bundled patches + wire into `pi update`
 pi-patcher reconcile    # apply pending patches; heal drifted ones
 pi-patcher list         # status + most recent heal session per patch
 pi-patcher heal <id>    # force-heal one patch (manual re-anchor)
 pi-patcher remove <id>  # revert the edits and delete the patch folder
+pi-patcher uninstall    # revert every patch and `npm uninstall -g pi-patcher`
 ```
 
-`reconcile` is the workhorse. It's what runs after `npm install -g pi-patcher` and after every `pi update`. You can also run it by hand after authoring or editing a patch.
+`init` is what you run once after `npm install`. Re-running it after upgrades is safe — it only copies bundled patches that aren't already in `~/.pi/patches/`.
 
-`remove` reverts the patch's edits first, then deletes the folder. If the file has drifted so the mechanical revert can't run, `remove` bails out and asks you to clean up the file by hand. The escape hatch is always `rm -rf ~/.pi/patches/<id>`.
+`reconcile` is the workhorse for steady-state. It runs automatically after every `pi update` (via the hook `init` installs), and you can also run it by hand after authoring or editing a patch.
+
+`remove` reverts the patch's edits first, then deletes the folder.
 
 ## Writing a patch
 
@@ -54,7 +56,7 @@ Each `oldText` must appear exactly once in the target file. `newText` must be no
 
 A spec can contain multiple files and multiple replacements per file. Mechanical apply, revert, and AI heal all iterate over every entry; heal runs one AI session per drifted replacement and rewrites only that entry's `oldText`/`newText`.
 
-JavaScript and JSON targets are syntax-checked after every edit. Any other file type (markdown, plain text, etc.) is supported.
+JavaScript and JSON targets are syntax-checked after every edit. Any file type (markdown, plain text, etc.) is supported.
 
 ## How healing works
 
@@ -68,19 +70,13 @@ When the literal `oldText`/`newText` no longer matches, pi-patcher hands the wor
 
 Every session is saved and its path is logged; replay with `pi --session <path>`.
 
-## Current limits
-
-- **No deletion patches.** `newText === ""` is rejected at spec load. Replace the line with a comment or no-op instead.
-- **No AI revert.** `pi-patcher remove` won't ask the AI to undo a drifted patch; it exits non-zero and asks you to clean the file by hand, then retry.
-- **Heal runs one AI session per drifted replacement.** A multi-replacement patch where three replacements have drifted spawns three heal sessions in sequence.
-
 ## Uninstalling
 
 ```sh
 pi-patcher uninstall
 ```
 
-Reverts every patch, deletes their folders, forgets state, then runs `npm uninstall -g pi-patcher`. One command, full cleanup. (If a custom patch has drifted, it's skipped with a message instead of failing — the file is already in a modified state you'd need to clean up by hand.)
+Reverts every patch, deletes their folders, forgets state, then runs `npm uninstall -g pi-patcher`.
 
 To *temporarily* disable pi-patcher without uninstalling, rename any patch directory to `_<id>`. The loader skips underscore-prefixed entries.
 
@@ -94,16 +90,6 @@ To *temporarily* disable pi-patcher without uninstalling, rename any patch direc
 bun test
 bun run typecheck
 bun run build
-```
-
-## Layout
-
-```text
-~/.pi/patches/        # your patches (user-authored, also bundled defaults)
-~/.pi/pi-patcher/     # tool-internal runtime data
-  backups/<ver>/      # pre-edit copies, keyed by pi version
-  heal-sessions/      # one dir per heal attempt
-  state.json          # last-applied / last-healed / last-error per patch
 ```
 
 ## License
