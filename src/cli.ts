@@ -36,7 +36,11 @@ try {
 }
 
 function main(argv: string[]): number {
-  const [cmd = "reconcile", ...rest] = argv;
+  if (argv.length === 0) {
+    console.log(helpText());
+    return 0;
+  }
+  const [cmd, ...rest] = argv;
   switch (cmd) {
     case "init":
       return cmdInit();
@@ -73,7 +77,6 @@ Self-healing patches for pi.
 
 Usage:
   pi-patcher init             Install bundled patches and wire into \`pi update\`
-  pi-patcher                  Same as reconcile
   pi-patcher reconcile        Apply pending patches; heal drifted ones
   pi-patcher list             Show status and most recent heal session
   pi-patcher heal <id>        Re-anchor a drifted patch via AI

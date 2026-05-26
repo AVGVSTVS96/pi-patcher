@@ -36,6 +36,8 @@ pi-patcher remove <id>  # revert the edits and delete the patch folder
 pi-patcher uninstall    # revert every patch and `npm uninstall -g pi-patcher`
 ```
 
+Running `pi-patcher` with no arguments prints this list.
+
 `init` is what you run once after `npm install`. Re-running it after upgrades is safe — it only copies bundled patches that aren't already in `~/.pi/patches/`.
 
 `reconcile` is the workhorse for steady-state. It runs automatically after every `pi update` (via the hook `init` installs), and you can also run it by hand after authoring or editing a patch.
