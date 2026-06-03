@@ -23,7 +23,9 @@ npm install -g pi-patcher
 pi-patcher init
 ```
 
-`pi-patcher init` copies the bundled `bootstrap-hook` patch into `~/.pi/patches/` and applies it, wiring `pi-patcher reconcile` into the end of `pi update` so your patches are re-applied automatically on every future update. Every edit is backed up under `~/.pi/pi-patcher/backups/<piVersion>/` and is reversible via `pi-patcher remove` or `pi-patcher uninstall`.
+`pi-patcher init` applies the bundled `bootstrap-hook` patch, wiring `pi-patcher reconcile` into the end of `pi update` so your patches are re-applied automatically on every future update. Every edit is backed up under `~/.pi/pi-patcher/backups/<piVersion>/` and is reversible via `pi-patcher remove` or `pi-patcher uninstall`.
+
+You write patches in `~/.pi/patches/`; pi-patcher's own bundled patches live separately under `~/.pi/pi-patcher/internal-patches/` and never touch your dir.
 
 ## Commands
 
@@ -32,17 +34,17 @@ pi-patcher init         # one-time setup: install bundled patches + wire into `p
 pi-patcher reconcile    # apply pending patches; heal drifted ones
 pi-patcher list         # status + most recent heal session per patch
 pi-patcher heal <id>    # force-heal one patch (manual re-anchor)
-pi-patcher remove <id>  # revert the edits and delete the patch folder
+pi-patcher remove <id>  # revert a user patch's edits and delete its folder
 pi-patcher uninstall    # revert every patch and `npm uninstall -g pi-patcher`
 ```
 
 Running `pi-patcher` with no arguments prints this list.
 
-`init` is what you run once after `npm install`. Re-running it after upgrades is safe — it only copies bundled patches that aren't already in `~/.pi/patches/`.
+`init` is what you run once after `npm install`. Re-running it after upgrades is safe.
 
 `reconcile` is the workhorse for steady-state. It runs automatically after every `pi update` (via the hook `init` installs), and you can also run it by hand after authoring or editing a patch.
 
-`remove` reverts the patch's edits first, then deletes the folder.
+`remove` reverts a user patch, then deletes its folder. Bundled patches are managed by pi-patcher — use `uninstall` to remove those.
 
 ## Writing a patch
 
@@ -78,7 +80,7 @@ Every session is saved and its path is logged; replay with `pi --session <path>`
 pi-patcher uninstall
 ```
 
-Reverts every patch, deletes their folders, forgets state, then runs `npm uninstall -g pi-patcher`.
+Reverts every patch (yours and the bundled ones), deletes their folders, forgets state, then runs `npm uninstall -g pi-patcher`.
 
 To *temporarily* disable pi-patcher without uninstalling, rename any patch directory to `_<id>`. The loader skips underscore-prefixed entries.
 

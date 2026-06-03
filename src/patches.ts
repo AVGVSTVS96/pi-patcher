@@ -15,8 +15,14 @@ const HOME = path.join(os.homedir(), ".pi", "pi-patcher");
 export const BACKUPS = path.join(HOME, "backups");
 export const HEAL_SESSIONS = path.join(HOME, "heal-sessions");
 export const STATE = path.join(HOME, "state.json");
+// pi-patcher's own bundled patches (currently just bootstrap-hook) live here,
+// kept separate from `~/.pi/patches/` which is reserved for user patches.
+export const INTERNAL_PATCHES_DIR = path.join(HOME, "internal-patches");
 export const PROMPTS_DIR = path.join(ROOT, "prompts");
-const BUNDLED_PATCHES = path.join(ROOT, "patches");
+// The package's shipped patches. Overridable for tests so they can point sync
+// at a fixture bundled dir with a controllable spec (cf. PI_PATCHER_HEAL_MODEL).
+const BUNDLED_PATCHES =
+  process.env.PI_PATCHER_BUNDLED_DIR ?? path.join(ROOT, "patches");
 
 export const HEAL_MODEL =
   process.env.PI_PATCHER_HEAL_MODEL ?? "openai-codex/gpt-5.5:low";
@@ -50,26 +56,71 @@ export type Status = "applied" | "pending" | "drift";
  * never silently mutates the user's pi install.
  */
 export function ensureLayout(): void {
-  for (const dir of [PATCHES_DIR, BACKUPS, HEAL_SESSIONS])
+  for (const dir of [PATCHES_DIR, INTERNAL_PATCHES_DIR, BACKUPS, HEAL_SESSIONS])
     fs.mkdirSync(dir, { recursive: true });
 }
 
+// ── Internal (bundled) patch sync ────────────────────────────
+export type SyncMode = "seed" | "refresh-only";
+export type SyncEvent = { id: string; action: "seeded" | "refreshed" };
+
 /**
- * Copy any bundled patches into `~/.pi/patches/`. Idempotent: existing
- * patches (and their `_<id>/` tombstones) are left alone, so re-running
- * `init` after an upgrade picks up newly-bundled patches without
- * clobbering user state. Called only by `pi-patcher init`.
+ * Seed/refresh pi-patcher's own bundled patches into
+ * `~/.pi/pi-patcher/internal-patches/`, leaving `~/.pi/patches/` (user patches)
+ * untouched. Per id, comparing the working spec sha to the recorded baseSha:
+ *   - absent           → seed from bundled (only in "seed" mode)
+ *   - untouched, stale → overwrite from bundled, so a shipped fix lands
+ *   - healed locally   → leave (working sha ≠ baseSha)
+ *   - already current  → leave (bundled sha === baseSha)
+ *
+ * "refresh-only" never seeds from absent, keeping the opt-in invariant: a bare
+ * `reconcile` without a prior `init` stays a no-op. The baseSha map is mutated
+ * in place (so this module needn't import State); returns events to log.
  */
-export function installBundledPatches(): void {
+export function syncInternalPatches(
+  baseShas: Record<string, string>,
+  mode: SyncMode,
+): SyncEvent[] {
   ensureLayout();
-  if (!fs.existsSync(BUNDLED_PATCHES)) return;
+  const events: SyncEvent[] = [];
+  if (!fs.existsSync(BUNDLED_PATCHES)) return events;
   for (const entry of fs.readdirSync(BUNDLED_PATCHES, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
-    const active = path.join(PATCHES_DIR, entry.name);
-    const skipped = path.join(PATCHES_DIR, `_${entry.name}`);
-    if (!fs.existsSync(active) && !fs.existsSync(skipped))
-      copyDir(path.join(BUNDLED_PATCHES, entry.name), active);
+    const id = entry.name;
+    const bundledDir = path.join(BUNDLED_PATCHES, id);
+    const bundledSpec = path.join(bundledDir, "spec.json");
+    if (!fs.existsSync(bundledSpec)) continue;
+    const bundledSha = sha(fs.readFileSync(bundledSpec, "utf8"));
+    const workingDir = path.join(INTERNAL_PATCHES_DIR, id);
+    const workingSpec = path.join(workingDir, "spec.json");
+
+    if (!fs.existsSync(workingSpec)) {
+      if (mode !== "seed") continue; // refresh-only never seeds from absent
+      copyDir(bundledDir, workingDir, true);
+      baseShas[id] = bundledSha;
+      events.push({ id, action: "seeded" });
+      continue;
+    }
+
+    const workingSha = sha(fs.readFileSync(workingSpec, "utf8"));
+    const baseSha = baseShas[id];
+    if (workingSha === baseSha && bundledSha !== baseSha) {
+      copyDir(bundledDir, workingDir, true); // untouched-since-seed AND newer bundled
+      baseShas[id] = bundledSha;
+      events.push({ id, action: "refreshed" });
+    } else if (baseSha === undefined) {
+      // Pre-existing copy we never recorded (e.g. upgrade from before this
+      // feature): treat as healed/custom and preserve, don't clobber.
+      baseShas[id] = workingSha;
+    }
+    // else: healed locally OR already current → leave untouched
   }
+  return events;
+}
+
+/** True if `id` is one of pi-patcher's own bundled patches (managed, not user). */
+export function isInternalPatch(id: string): boolean {
+  return fs.existsSync(path.join(INTERNAL_PATCHES_DIR, id, "spec.json"));
 }
 
 export function findPiRoot(): string {
@@ -118,23 +169,36 @@ export function resolveTarget(piRoot: string, target: string): string {
 
 export function allPatches(): Patch[] {
   ensureLayout();
+  const internal = discoverPatchesIn(INTERNAL_PATCHES_DIR);
+  const user = discoverPatchesIn(PATCHES_DIR);
+  // Internal (managed) patches win on id collision; the user dir is otherwise
+  // discovered and reconciled exactly as before.
+  const seen = new Set(internal.map((p) => p.id));
+  return [...internal, ...user.filter((p) => !seen.has(p.id))].sort((a, b) =>
+    a.id.localeCompare(b.id),
+  );
+}
+
+function discoverPatchesIn(dir: string): Patch[] {
+  if (!fs.existsSync(dir)) return [];
   return fs
-    .readdirSync(PATCHES_DIR, { withFileTypes: true })
+    .readdirSync(dir, { withFileTypes: true })
     .filter(
       (e) =>
         e.isDirectory() &&
         !e.name.startsWith("_") &&
-        fs.existsSync(path.join(PATCHES_DIR, e.name, "spec.json")),
+        fs.existsSync(path.join(dir, e.name, "spec.json")),
     )
-    .map((e) => loadFromDir(path.join(PATCHES_DIR, e.name)))
-    .sort((a, b) => a.id.localeCompare(b.id));
+    .map((e) => loadFromDir(path.join(dir, e.name)));
 }
 
 export function loadPatch(id: string): Patch {
   ensureLayout();
-  const dir = path.join(PATCHES_DIR, id);
-  if (!fs.existsSync(dir)) throw new Error(`No patch named ${id}`);
-  return loadFromDir(dir);
+  for (const base of [INTERNAL_PATCHES_DIR, PATCHES_DIR]) {
+    const dir = path.join(base, id);
+    if (fs.existsSync(path.join(dir, "spec.json"))) return loadFromDir(dir);
+  }
+  throw new Error(`No patch named ${id}`);
 }
 
 export function saveSpec(patch: Patch, spec: PatchSpec): void {
@@ -377,12 +441,12 @@ export function derivePatch(
 }
 
 // ── Internal ─────────────────────────────────────────────────
-function copyDir(src: string, dst: string): void {
+function copyDir(src: string, dst: string, overwrite = false): void {
   fs.mkdirSync(dst, { recursive: true });
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
     const s = path.join(src, entry.name);
     const d = path.join(dst, entry.name);
-    if (entry.isDirectory()) copyDir(s, d);
-    else if (!fs.existsSync(d)) fs.copyFileSync(s, d);
+    if (entry.isDirectory()) copyDir(s, d, overwrite);
+    else if (overwrite || !fs.existsSync(d)) fs.copyFileSync(s, d);
   }
 }

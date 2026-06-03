@@ -16,6 +16,10 @@ export type State = {
   piVersion?: string;
   lastRunAt?: string;
   patches: Record<string, PatchState>;
+  // Per internal-patch id: the sha of the bundled spec last synced into
+  // ~/.pi/pi-patcher/internal-patches/. Lets sync tell "untouched since seed"
+  // (refreshable when a fix ships) from "healed locally" (preserve).
+  internalBaseShas?: Record<string, string>;
 };
 
 export function loadState(): State {

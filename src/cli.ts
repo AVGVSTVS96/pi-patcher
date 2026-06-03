@@ -4,16 +4,18 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import {
   type Patch,
+  type SyncEvent,
   ROOT,
   allPatches,
   applyEdits,
   ensureLayout,
   findPiRoot,
-  installBundledPatches,
+  isInternalPatch,
   loadPatch,
   removePatchDir,
   revertEdits,
   statusOf,
+  syncInternalPatches,
 } from "./patches.js";
 import {
   type State,
@@ -106,40 +108,88 @@ function version(): string {
  * applied; already-applied patches are skipped; drifted patches are handed
  * to the AI heal flow. Exits non-zero if any patch fails so users notice
  * after `pi update`.
+ *
+ * Internal (bundled) patches are refreshed first — refresh-only, so a bare
+ * `reconcile` without a prior `init` stays a no-op, but a shipped fix lands
+ * automatically the next time `pi update` runs reconcile.
  */
 function cmdReconcile(): number {
   return withSession((piRoot, state) => {
-    let failed = 0;
-    for (const patch of allPatches()) {
-      try {
-        reconcileOne(patch, piRoot, state);
-      } catch (error) {
-        failed++;
-        const message = msg(error);
-        recordError(state, patch.id, message);
-        console.log(`pi-patcher: ${patch.id} failed: ${message}`);
-      }
-    }
-    return failed ? 1 : 0;
+    state.internalBaseShas ??= {};
+    logSyncEvents(syncInternalPatches(state.internalBaseShas, "refresh-only"));
+    const summary = applyAll(piRoot, state);
+    logSummary(summary);
+    return summary.failed ? 1 : 0;
   });
 }
 
-function reconcileOne(patch: Patch, piRoot: string, state: State): void {
+type RunSummary = {
+  applied: number;
+  healed: number;
+  current: number;
+  failed: number;
+};
+
+/**
+ * Reconcile every discovered patch, accumulating a summary. Always logs a
+ * one-line result so a `pi update`-triggered reconcile shows what pi-patcher
+ * did or found, even when everything is already up to date.
+ */
+function applyAll(piRoot: string, state: State): RunSummary {
+  const summary: RunSummary = { applied: 0, healed: 0, current: 0, failed: 0 };
+  for (const patch of allPatches()) {
+    try {
+      summary[reconcileOne(patch, piRoot, state)]++;
+    } catch (error) {
+      summary.failed++;
+      const message = msg(error);
+      recordError(state, patch.id, message);
+      console.log(`pi-patcher: ${patch.id} failed: ${message}`);
+    }
+  }
+  return summary;
+}
+
+function reconcileOne(
+  patch: Patch,
+  piRoot: string,
+  state: State,
+): "applied" | "healed" | "current" {
   switch (statusOf(patch, piRoot)) {
     case "applied":
       delete state.patches[patch.id]?.lastError;
-      return;
+      return "current";
     case "pending": {
       const targetSha = applyEdits(patch, piRoot);
       if (targetSha) recordApplied(state, patch.id, targetSha);
       console.log(`pi-patcher: applied ${patch.id}`);
-      return;
+      return "applied";
     }
     case "drift":
       if (!heal(patch, piRoot, state))
         throw new Error(patchError(state, patch.id) ?? "heal failed");
-      return;
+      return "healed";
   }
+}
+
+function logSyncEvents(events: SyncEvent[]): void {
+  for (const e of events)
+    console.log(
+      e.action === "seeded"
+        ? `pi-patcher: seeded internal patch ${e.id}`
+        : `pi-patcher: refreshed internal patch ${e.id} (shipped update)`,
+    );
+}
+
+function logSummary(s: RunSummary): void {
+  const parts: string[] = [];
+  if (s.applied) parts.push(`${s.applied} applied`);
+  if (s.healed) parts.push(`${s.healed} healed`);
+  if (s.current) parts.push(`${s.current} already current`);
+  if (s.failed) parts.push(`${s.failed} failed`);
+  console.log(
+    `pi-patcher: ${parts.length ? parts.join(", ") : "no patches to apply"}`,
+  );
 }
 
 function cmdList(): number {
@@ -168,6 +218,11 @@ function cmdHeal(id: string): number {
  */
 function cmdRemove(id: string): number {
   return withSession((piRoot, state) => {
+    if (isInternalPatch(id))
+      throw new Error(
+        `${id} is managed by pi-patcher; use \`pi-patcher uninstall\` to remove it`,
+      );
+
     const patch = loadPatch(id);
     const status = statusOf(patch, piRoot);
 
@@ -193,34 +248,26 @@ function cmdRemove(id: string): number {
 
 /**
  * `pi-patcher init` — the single user-facing command for opting into
- * pi-patcher's modifications to your pi install. Copies the bundled
- * patches (currently just `bootstrap-hook`) into `~/.pi/patches/`, then
- * applies them. Idempotent: safe to re-run after upgrades to pick up
- * newly-bundled patches.
+ * pi-patcher's modifications to your pi install. Seeds the bundled patches
+ * (currently just `bootstrap-hook`) into `~/.pi/pi-patcher/internal-patches/`,
+ * then applies them. Idempotent: safe to re-run after upgrades to pick up
+ * newly-bundled patches or shipped fixes (seed + refresh).
  *
  * No `postinstall` hook runs this automatically — we explicitly want the
  * user to opt in to mutating their pi install.
  */
 function cmdInit(): number {
   return withSession((piRoot, state) => {
-    installBundledPatches();
-    let failed = 0;
-    for (const patch of allPatches()) {
-      try {
-        reconcileOne(patch, piRoot, state);
-      } catch (error) {
-        failed++;
-        const message = msg(error);
-        recordError(state, patch.id, message);
-        console.log(`pi-patcher: ${patch.id} failed: ${message}`);
-      }
-    }
-    if (!failed) {
+    state.internalBaseShas ??= {};
+    logSyncEvents(syncInternalPatches(state.internalBaseShas, "seed"));
+    const summary = applyAll(piRoot, state);
+    logSummary(summary);
+    if (!summary.failed) {
       console.log("");
       console.log("pi-patcher is wired into pi update.");
       console.log("To remove cleanly later, run: pi-patcher uninstall");
     }
-    return failed ? 1 : 0;
+    return summary.failed ? 1 : 0;
   });
 }
 
@@ -228,7 +275,9 @@ function cmdInit(): number {
  * `pi-patcher uninstall` — the single user-facing command for tearing
  * pi-patcher down. Reverts every applied patch (skipping drifted ones,
  * since the user has already modified those files), deletes every patch
- * folder, forgets state, then runs `npm uninstall -g pi-patcher`.
+ * folder — user patches under `~/.pi/patches/` and managed ones under
+ * `~/.pi/pi-patcher/internal-patches/` alike — forgets state, then runs
+ * `npm uninstall -g pi-patcher`.
  *
  * Drift is not a hard error: if the user has a custom patch whose target
  * file has been rewritten upstream, we can't safely revert it. We delete
@@ -256,9 +305,12 @@ function cmdUninstall(): number {
           `pi-patcher: ${patch.id} revert failed: ${msg(error)} (continuing)`,
         );
       }
-      removePatchDir(patch.id);
+      // Remove by the patch's actual directory so managed patches are deleted
+      // from internal-patches/, not just user patches from ~/.pi/patches/.
+      fs.rmSync(patch.dir, { recursive: true, force: true });
       delete state.patches[patch.id];
     }
+    delete state.internalBaseShas;
     console.log(
       issues
         ? `pi-patcher: removed ${issues === 1 ? "1 patch with caveats" : `patches (${issues} with caveats)`}; running \`npm uninstall -g pi-patcher\`…`
