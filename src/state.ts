@@ -6,14 +6,12 @@ export type PatchState = {
   lastAppliedAt?: string;
   lastHealedAt?: string;
   lastRevertedAt?: string;
-  lastTargetSha?: string;
   lastError?: string;
   lastSessions?: string[];
 };
 
 export type State = {
   piRoot?: string;
-  piVersion?: string;
   lastRunAt?: string;
   patches: Record<string, PatchState>;
   // Per internal-patch id: the sha of the bundled spec last synced into
@@ -35,24 +33,21 @@ export function saveState(state: State): void {
   fs.writeFileSync(STATE, `${JSON.stringify(state, null, 2)}\n`);
 }
 
-export function recordApplied(state: State, id: string, sha: string): void {
+export function recordApplied(state: State, id: string): void {
   const entry = entryFor(state, id);
   entry.lastAppliedAt = new Date().toISOString();
-  entry.lastTargetSha = sha;
   delete entry.lastError;
 }
 
-export function recordReverted(state: State, id: string, sha: string): void {
+export function recordReverted(state: State, id: string): void {
   const entry = entryFor(state, id);
   entry.lastRevertedAt = new Date().toISOString();
-  entry.lastTargetSha = sha;
   delete entry.lastError;
 }
 
-export function recordHealed(state: State, id: string, sha: string): void {
+export function recordHealed(state: State, id: string): void {
   const entry = entryFor(state, id);
   entry.lastHealedAt = new Date().toISOString();
-  entry.lastTargetSha = sha;
   delete entry.lastError;
 }
 

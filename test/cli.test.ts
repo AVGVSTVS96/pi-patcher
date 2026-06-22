@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { derivePatch } from "../src/patches.js";
+import { count, derivePatch } from "../src/patches.js";
 
 const repoRoot = path.resolve(import.meta.dir, "..");
 const cleanups: string[] = [];
@@ -288,6 +288,47 @@ describe("pi-patcher CLI", () => {
     expect(result.exitCode).toBe(1);
     expect(result.stdout).toContain("pi-patcher: bad-syntax failed:");
     expect(fs.readFileSync(badTarget, "utf8")).toBe("const x = 1;\n");
+  });
+
+  test("a replacement that can't anchor fails the patch and rolls back already-written files", () => {
+    // No silent partial apply: file-a applies cleanly and is written, then
+    // file-b's second replacement can't anchor (its oldText was consumed by
+    // the first). The whole patch must fail and file-a must be restored.
+    const ctx = makeFakePi({ packageManagerCli: originalPackageManagerCli });
+    const aPath = path.join(ctx.piRoot, "dist", "a.js");
+    const bPath = path.join(ctx.piRoot, "dist", "b.js");
+    fs.writeFileSync(aPath, "const a = 1;\n");
+    fs.writeFileSync(bPath, "// dup\n");
+    writePatch(ctx, "twin-fail", {
+      files: [
+        {
+          target: "dist/a.js",
+          replacements: [{ oldText: "const a = 1;\n", newText: "const a = 2;\n" }],
+        },
+        {
+          // Both replacements share the same oldText. statusOf sees each as
+          // pending against the original, but after the first applies the
+          // second has nothing left to match.
+          target: "dist/b.js",
+          replacements: [
+            { oldText: "// dup\n", newText: "// one\n" },
+            { oldText: "// dup\n", newText: "// two\n" },
+          ],
+        },
+      ],
+    });
+
+    const result = runCli(ctx, ["reconcile"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain("pi-patcher: twin-fail failed:");
+    expect(result.stdout).toContain("expected exactly one occurrence of oldText");
+    // file-a was written then rolled back; file-b was never touched.
+    expect(fs.readFileSync(aPath, "utf8")).toBe("const a = 1;\n");
+    expect(fs.readFileSync(bPath, "utf8")).toBe("// dup\n");
+    expect(readState(ctx).patches["twin-fail"].lastError).toContain(
+      "cannot apply a replacement",
+    );
   });
 
   test("an aborted heal during reconcile is saved in state", () => {
@@ -622,6 +663,44 @@ describe("derivePatch", () => {
       oldText: "function value() { return 1; }\n",
       newText: "function value() { return 2; }\n",
     });
+  });
+
+  test("spans multiple changed lines in a single replacement", () => {
+    const before = "head\nfoo();\nbar();\ntail\n";
+    const after = "head\nFOO();\nBAR();\ntail\n";
+
+    expect(derivePatch(before, after)).toEqual({
+      oldText: "foo();\nbar();\n",
+      newText: "FOO();\nBAR();\n",
+    });
+  });
+
+  test("handles an edit at EOF with no trailing newline", () => {
+    const before = "export const x = 1";
+    const after = "export const x = 2";
+
+    expect(derivePatch(before, after)).toEqual({
+      oldText: "export const x = 1",
+      newText: "export const x = 2",
+    });
+  });
+
+  test("grows the window until each side is uniquely anchored", () => {
+    // Two identical lines; only the second changes. A single-line window
+    // would be ambiguous (oldText appears twice), so derivePatch must grow
+    // until both sides are unique and the edit round-trips exactly.
+    const before = "val = 1;\nval = 1;\n";
+    const after = "val = 1;\nval = 2;\n";
+
+    const derived = derivePatch(before, after);
+    expect(derived).not.toBeNull();
+    expect(count(before, derived!.oldText)).toBe(1);
+    expect(count(after, derived!.newText)).toBe(1);
+    expect(before.replace(derived!.oldText, derived!.newText)).toBe(after);
+  });
+
+  test("returns null when nothing changed", () => {
+    expect(derivePatch("same\n", "same\n")).toBeNull();
   });
 });
 

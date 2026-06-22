@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 // ── Locations ────────────────────────────────────────────────
@@ -12,7 +12,6 @@ export const ROOT = path.resolve(
 );
 export const PATCHES_DIR = path.join(os.homedir(), ".pi", "patches");
 const HOME = path.join(os.homedir(), ".pi", "pi-patcher");
-export const BACKUPS = path.join(HOME, "backups");
 export const HEAL_SESSIONS = path.join(HOME, "heal-sessions");
 export const STATE = path.join(HOME, "state.json");
 // pi-patcher's own bundled patches (currently just bootstrap-hook) live here,
@@ -50,13 +49,13 @@ export type Status = "applied" | "pending" | "drift";
 // ── Layout / discovery ───────────────────────────────────────
 /**
  * Create the runtime directories pi-patcher needs (`~/.pi/patches/` for
- * user-authored patches, `~/.pi/pi-patcher/` for state, backups, and heal
- * sessions). This does NOT install bundled patches — that's an explicit
- * opt-in via `pi-patcher init`, so plain `npm install -g pi-patcher`
- * never silently mutates the user's pi install.
+ * user-authored patches, `~/.pi/pi-patcher/` for state and heal sessions).
+ * This does NOT install bundled patches — that's an explicit opt-in via
+ * `pi-patcher init`, so plain `npm install -g pi-patcher` never silently
+ * mutates the user's pi install.
  */
 export function ensureLayout(): void {
-  for (const dir of [PATCHES_DIR, INTERNAL_PATCHES_DIR, BACKUPS, HEAL_SESSIONS])
+  for (const dir of [PATCHES_DIR, INTERNAL_PATCHES_DIR, HEAL_SESSIONS])
     fs.mkdirSync(dir, { recursive: true });
 }
 
@@ -147,14 +146,6 @@ export function findPiRoot(): string {
     current = path.dirname(current);
   }
   throw new Error("Could not resolve pi package root from `pi` on PATH");
-}
-
-export function piVersion(): string {
-  const result = spawnSync("pi", ["--version"], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  return (result.stdout || result.stderr || "unknown").trim() || "unknown";
 }
 
 export function resolveTarget(piRoot: string, target: string): string {
@@ -275,66 +266,66 @@ export function classify(r: Replacement, text: string): Status {
 
 // ── Mechanical apply / revert ────────────────────────────────
 //
-// Both run all replacements as a transaction. If any file fails
-// `node --check`, every file modified in this call is rolled back.
-// Returns the sha of the last successfully changed file, or null if
-// nothing changed.
+// Both run all replacements as a transaction. If any replacement can't be
+// anchored, or any file fails `node --check`, every file modified in this
+// call is rolled back from an in-memory snapshot. Returns true if any file
+// changed, false if nothing needed doing.
 
-export function applyEdits(patch: Patch, piRoot: string): string | null {
+export function applyEdits(patch: Patch, piRoot: string): boolean {
   return runEdits(patch, piRoot, false);
 }
 
-export function revertEdits(patch: Patch, piRoot: string): string | null {
+export function revertEdits(patch: Patch, piRoot: string): boolean {
   return runEdits(patch, piRoot, true);
 }
 
-function runEdits(
-  patch: Patch,
-  piRoot: string,
-  reverse: boolean,
-): string | null {
-  const version = piVersion();
+function runEdits(patch: Patch, piRoot: string, reverse: boolean): boolean {
   const originals = new Map<string, string>();
-  let lastSha: string | null = null;
+  let changed = false;
   try {
     for (const file of patch.spec.files) {
       const target = resolveTarget(piRoot, file.target);
       const original = fs.readFileSync(target, "utf8");
       let text = original;
-      backupFile(target, version);
       for (const r of file.replacements) {
-        const from = reverse ? r.newText : r.oldText;
-        const to = reverse ? r.oldText : r.newText;
-        if (count(text, from) !== 1) continue;
-        text = text.replace(from, to);
+        // Idempotent + strict. `classify` checks newText first, so it stays
+        // correct even when newText contains oldText (e.g. an insert-after
+        // patch). Skip a replacement already in its desired state, apply one
+        // that's uniquely anchored, otherwise fail loudly rather than
+        // silently dropping it (no partial applies).
+        const status = classify(r, text);
+        const done = reverse ? "pending" : "applied";
+        const ready = reverse ? "applied" : "pending";
+        if (status === done) continue;
+        if (status === ready) {
+          text = reverse
+            ? text.replace(r.newText, r.oldText)
+            : text.replace(r.oldText, r.newText);
+          continue;
+        }
+        throw new Error(
+          `${patch.id}: ${file.target}: cannot ${
+            reverse ? "revert" : "apply"
+          } a replacement (expected exactly one occurrence of ${
+            reverse ? "newText" : "oldText"
+          })`,
+        );
       }
       if (text === original) continue;
       if (!originals.has(target)) originals.set(target, original);
       fs.writeFileSync(target, text);
       validateTarget(target);
-      lastSha = sha(text);
+      changed = true;
     }
   } catch (error) {
     for (const [target, original] of originals)
       fs.writeFileSync(target, original);
     throw error;
   }
-  return lastSha;
+  return changed;
 }
 
 // ── Primitives ───────────────────────────────────────────────
-export function backupFile(target: string, version: string): string {
-  const safe = target.replaceAll(path.sep, "__");
-  const dst = path.join(
-    BACKUPS,
-    version.replace(/[^a-zA-Z0-9._-]/g, "_"),
-    safe,
-  );
-  fs.mkdirSync(path.dirname(dst), { recursive: true });
-  if (!fs.existsSync(dst)) fs.copyFileSync(target, dst);
-  return dst;
-}
-
 /**
  * Validate the target file after an edit, choosing the validator by file
  * extension. Throws on failure. For unknown extensions there's no automatic

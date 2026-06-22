@@ -23,7 +23,7 @@ npm install -g pi-patcher
 pi-patcher init
 ```
 
-`pi-patcher init` applies the bundled `bootstrap-hook` patch, wiring `pi-patcher reconcile` into the end of `pi update` so your patches are re-applied automatically on every future update. Every edit is backed up under `~/.pi/pi-patcher/backups/<piVersion>/` and is reversible via `pi-patcher remove` or `pi-patcher uninstall`.
+`pi-patcher init` applies the bundled `bootstrap-hook` patch, wiring `pi-patcher reconcile` into the end of `pi update` so your patches are re-applied automatically on every future update. Every edit is reversible via `pi-patcher remove` or `pi-patcher uninstall`, and any failed apply or heal is rolled back automatically, leaving the target file untouched.
 
 You write patches in `~/.pi/patches/`; pi-patcher's own bundled patches live separately under `~/.pi/pi-patcher/internal-patches/` and never touch your dir.
 

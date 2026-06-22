@@ -7,14 +7,11 @@ import {
   HEAL_MODEL,
   HEAL_SESSIONS,
   PROMPTS_DIR,
-  backupFile,
   classify,
   count,
   derivePatch,
-  piVersion,
   resolveTarget,
   saveSpec,
-  sha,
   validateTarget,
 } from "./patches.js";
 import {
@@ -65,7 +62,6 @@ function healOne(
   const replacement = file.replacements[ri]!;
   const target = resolveTarget(piRoot, file.target);
   const before = fs.readFileSync(target, "utf8");
-  backupFile(target, piVersion());
 
   const label = healLabel(patch, fi, ri);
   say(`pi-patcher: ${label} drifted. Self-healing\u2026`);
@@ -131,7 +127,7 @@ function healOne(
     return fail("edits did not produce a derivable patch");
 
   rewriteReplacement(patch, fi, ri, derived);
-  recordHealed(state, patch.id, sha(after));
+  recordHealed(state, patch.id);
   say(
     `pi-patcher: ${label} healed. Session: pi --session ${sessionPath ?? "(no session)"}`,
   );

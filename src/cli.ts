@@ -160,8 +160,7 @@ function reconcileOne(
       delete state.patches[patch.id]?.lastError;
       return "current";
     case "pending": {
-      const targetSha = applyEdits(patch, piRoot);
-      if (targetSha) recordApplied(state, patch.id, targetSha);
+      if (applyEdits(patch, piRoot)) recordApplied(state, patch.id);
       console.log(`pi-patcher: applied ${patch.id}`);
       return "applied";
     }
@@ -234,8 +233,7 @@ function cmdRemove(id: string): number {
       );
 
     if (status === "applied") {
-      const targetSha = revertEdits(patch, piRoot);
-      if (targetSha) recordReverted(state, patch.id, targetSha);
+      if (revertEdits(patch, piRoot)) recordReverted(state, patch.id);
       console.log(`pi-patcher: reverted ${id}`);
     }
 
@@ -324,7 +322,6 @@ function cmdUninstall(): number {
   // the inode persists until we exit, so this is safe.
   const result = spawnSync("npm", ["uninstall", "-g", "pi-patcher"], {
     stdio: "inherit",
-    shell: process.platform === "win32",
   });
   return result.status ?? 1;
 }
