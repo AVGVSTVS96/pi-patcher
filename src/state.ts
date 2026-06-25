@@ -58,10 +58,10 @@ export function recordError(state: State, id: string, message: string): void {
 export function rememberSession(
   state: State,
   id: string,
-  sessionPath: string,
+  sessionId: string,
 ): void {
   const entry = entryFor(state, id);
-  entry.lastSessions = [sessionPath, ...(entry.lastSessions ?? [])].slice(0, 10);
+  entry.lastSessions = [sessionId, ...(entry.lastSessions ?? [])].slice(0, 10);
 }
 
 export function forgetPatch(state: State, id: string): void {

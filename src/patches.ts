@@ -12,7 +12,6 @@ export const ROOT = path.resolve(
 );
 export const PATCHES_DIR = path.join(os.homedir(), ".pi", "patches");
 const HOME = path.join(os.homedir(), ".pi", "pi-patcher");
-export const HEAL_SESSIONS = path.join(HOME, "heal-sessions");
 export const STATE = path.join(HOME, "state.json");
 // pi-patcher's own bundled patches (currently just bootstrap-hook) live here,
 // kept separate from `~/.pi/patches/` which is reserved for user patches.
@@ -49,13 +48,13 @@ export type Status = "applied" | "pending" | "drift";
 // ── Layout / discovery ───────────────────────────────────────
 /**
  * Create the runtime directories pi-patcher needs (`~/.pi/patches/` for
- * user-authored patches, `~/.pi/pi-patcher/` for state and heal sessions).
+ * user-authored patches and `~/.pi/pi-patcher/internal-patches/` for bundled patches).
  * This does NOT install bundled patches — that's an explicit opt-in via
  * `pi-patcher init`, so plain `npm install -g pi-patcher` never silently
  * mutates the user's pi install.
  */
 export function ensureLayout(): void {
-  for (const dir of [PATCHES_DIR, INTERNAL_PATCHES_DIR, HEAL_SESSIONS])
+  for (const dir of [PATCHES_DIR, INTERNAL_PATCHES_DIR])
     fs.mkdirSync(dir, { recursive: true });
 }
 

@@ -1,11 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   type Patch,
   type Replacement,
   HEAL_MODEL,
-  HEAL_SESSIONS,
   PROMPTS_DIR,
   classify,
   count,
@@ -66,15 +66,11 @@ function healOne(
   const label = healLabel(patch, fi, ri);
   say(`pi-patcher: ${label} drifted. Self-healing\u2026`);
 
-  const sessionDir = path.join(
-    HEAL_SESSIONS,
-    `${patch.id}-${new Date().toISOString().replace(/[:.]/g, "-")}`,
-  );
-  fs.mkdirSync(sessionDir, { recursive: true });
+  const sessionId = crypto.randomUUID();
 
   const child = spawnSync(
     "pi",
-    ["-p", "--model", HEAL_MODEL, "--session-dir", sessionDir],
+    ["-p", "--model", HEAL_MODEL, "--session-id", sessionId],
     {
       input: renderPrompt(patch, target, replacement),
       encoding: "utf8",
@@ -86,14 +82,13 @@ function healOne(
   if (output.trim())
     process.stdout.write(output.endsWith("\n") ? output : `${output}\n`);
 
-  const sessionPath = latestSessionFile(sessionDir);
-  if (sessionPath) rememberSession(state, patch.id, sessionPath);
+  rememberSession(state, patch.id, sessionId);
 
   const fail = (reason: string) => {
     fs.writeFileSync(target, before);
     recordError(state, patch.id, reason);
     say(
-      `pi-patcher: ${label} not healed. Inspect: pi --session ${sessionPath ?? "(no session)"}`,
+      `pi-patcher: ${label} not healed. Inspect: pi --session ${sessionId}`,
     );
     say(`Reason: ${reason}`);
     return false;
@@ -129,7 +124,7 @@ function healOne(
   rewriteReplacement(patch, fi, ri, derived);
   recordHealed(state, patch.id);
   say(
-    `pi-patcher: ${label} healed. Session: pi --session ${sessionPath ?? "(no session)"}`,
+    `pi-patcher: ${label} healed. Session: pi --session ${sessionId}`,
   );
   return true;
 }
@@ -169,16 +164,6 @@ function validationHint(targetPath: string): string {
   if (ext === ".json")
     return `The target file must remain valid JSON after edits.`;
   return `The target file must remain syntactically valid for its language; no automatic check is run for this file type.`;
-}
-
-function latestSessionFile(dir: string): string | undefined {
-  if (!fs.existsSync(dir)) return undefined;
-  return fs
-    .readdirSync(dir)
-    .filter((f) => f.endsWith(".jsonl"))
-    .map((f) => path.join(dir, f))
-    .sort()
-    .at(-1);
 }
 
 function rewriteReplacement(
