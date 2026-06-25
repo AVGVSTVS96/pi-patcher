@@ -77,20 +77,19 @@ async function healOne(
   stopSpinner();
 
   const output = child.output;
-  rememberSession(state, patch.id, sessionId);
-
-  const fail = (reason: string) => {
+  const fail = (reason: string, inspect = true) => {
     fs.writeFileSync(target, before);
     recordError(state, patch.id, reason);
+    if (inspect) rememberSession(state, patch.id, sessionId);
     logFailure(`${label} not healed`);
     logDetail(`Reason: ${reason}`);
-    logDetail(`Inspect: ${ui.cyan(`pi --session ${sessionId}`)}`);
+    if (inspect) logDetail(`Inspect: ${ui.cyan(`pi --session ${sessionId}`)}`);
     return false;
   };
 
   const abort = output.match(/===ABORT===([\s\S]*?)===END===/);
   if (abort) return fail(abort[1]!.trim());
-  if (child.error) return fail(`failed to start pi: ${child.error.message}`);
+  if (child.error) return fail(`failed to start pi: ${child.error.message}`, false);
   if (child.status !== 0)
     return fail(
       child.signal
@@ -116,6 +115,7 @@ async function healOne(
     return fail("edits did not produce a derivable patch");
 
   rewriteReplacement(patch, fi, ri, derived);
+  rememberSession(state, patch.id, sessionId);
   recordHealed(state, patch.id);
   logSuccess(`${label} healed`);
   logDetail(`Inspect: ${ui.cyan(`pi --session ${sessionId}`)}`);
