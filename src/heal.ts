@@ -72,7 +72,7 @@ async function healOne(
   const stopSpinner = startSpinner(`healing ${label} with ${HEAL_MODEL}`);
   const child = await runPiHeal(
     ["-p", "--model", HEAL_MODEL, "--session-id", sessionId],
-    renderPrompt(patch, target, replacement),
+    renderPrompt(patch, file.target, target, replacement),
   );
   stopSpinner();
 
@@ -201,23 +201,42 @@ function healLabel(patch: Patch, fi: number, ri: number): string {
 
 function renderPrompt(
   patch: Patch,
+  target: string,
   targetPath: string,
   replacement: Replacement,
 ): string {
   const template = fs.readFileSync(path.join(PROMPTS_DIR, "heal.md"), "utf8");
   return template
     .replaceAll("{{patch_id}}", patch.id)
-    .replaceAll("{{intent}}", patch.intent.trim())
-    .replaceAll(
-      "{{replacement}}",
-      JSON.stringify(
-        { oldText: replacement.oldText, newText: replacement.newText },
-        null,
-        2,
-      ),
-    )
     .replaceAll("{{target_path}}", targetPath)
+    .replaceAll("{{patch_markdown}}", patchMarkdownContext(patch, target, replacement))
     .replaceAll("{{validation_hint}}", validationHint(targetPath));
+}
+
+function patchMarkdownContext(
+  patch: Patch,
+  target: string,
+  replacement: Replacement,
+): string {
+  if (patch.source === "markdown") {
+    const patchMd = path.join(patch.dir, "PATCH.md");
+    if (fs.existsSync(patchMd)) return fs.readFileSync(patchMd, "utf8").trim();
+    if (patch.markdown) return patch.markdown.trim();
+  }
+
+  return [
+    `# ${patch.id}`,
+    "",
+    patch.intent.trim() || "Legacy spec.json patch.",
+    "",
+    `\`\`\`patch file=${target}`,
+    "<<<<<<< SEARCH",
+    replacement.oldText.replace(/\n$/, ""),
+    "=======",
+    replacement.newText.replace(/\n$/, ""),
+    ">>>>>>> REPLACE",
+    "```",
+  ].join("\n");
 }
 
 function validationHint(targetPath: string): string {

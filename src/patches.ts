@@ -41,6 +41,19 @@ export type Patch = {
   dir: string;
   intent: string;
   spec: PatchSpec;
+  source: "markdown" | "json";
+  summary?: string;
+  title?: string;
+  markdown?: string;
+  markdownBlocks?: MarkdownEditBlock[];
+};
+
+type MarkdownEditBlock = {
+  start: number;
+  end: number;
+  fileIndex: number;
+  replacementIndex: number;
+  target: string;
 };
 
 export type Status = "applied" | "pending" | "drift";
@@ -86,24 +99,24 @@ export function syncInternalPatches(
     if (!entry.isDirectory()) continue;
     const id = entry.name;
     const bundledDir = path.join(BUNDLED_PATCHES, id);
-    const bundledSpec = path.join(bundledDir, "spec.json");
-    if (!fs.existsSync(bundledSpec)) continue;
-    const bundledSha = sha(fs.readFileSync(bundledSpec, "utf8"));
+    const bundledFile = patchDefinitionPath(bundledDir);
+    if (!bundledFile) continue;
+    const bundledSha = sha(fs.readFileSync(bundledFile, "utf8"));
     const workingDir = path.join(INTERNAL_PATCHES_DIR, id);
-    const workingSpec = path.join(workingDir, "spec.json");
+    const workingFile = patchDefinitionPath(workingDir);
 
-    if (!fs.existsSync(workingSpec)) {
+    if (!workingFile) {
       if (mode !== "seed") continue; // refresh-only never seeds from absent
-      copyDir(bundledDir, workingDir, true);
+      replaceDir(bundledDir, workingDir);
       baseShas[id] = bundledSha;
       events.push({ id, action: "seeded" });
       continue;
     }
 
-    const workingSha = sha(fs.readFileSync(workingSpec, "utf8"));
+    const workingSha = sha(fs.readFileSync(workingFile, "utf8"));
     const baseSha = baseShas[id];
     if (workingSha === baseSha && bundledSha !== baseSha) {
-      copyDir(bundledDir, workingDir, true); // untouched-since-seed AND newer bundled
+      replaceDir(bundledDir, workingDir); // untouched-since-seed AND newer bundled
       baseShas[id] = bundledSha;
       events.push({ id, action: "refreshed" });
     } else if (baseSha === undefined) {
@@ -118,7 +131,7 @@ export function syncInternalPatches(
 
 /** True if `id` is one of pi-patcher's own bundled patches (managed, not user). */
 export function isInternalPatch(id: string): boolean {
-  return fs.existsSync(path.join(INTERNAL_PATCHES_DIR, id, "spec.json"));
+  return patchDefinitionPath(path.join(INTERNAL_PATCHES_DIR, id)) !== undefined;
 }
 
 export function findPiRoot(): string {
@@ -177,7 +190,7 @@ function discoverPatchesIn(dir: string): Patch[] {
       (e) =>
         e.isDirectory() &&
         !e.name.startsWith("_") &&
-        fs.existsSync(path.join(dir, e.name, "spec.json")),
+        patchDefinitionPath(path.join(dir, e.name)) !== undefined,
     )
     .map((e) => loadFromDir(path.join(dir, e.name)));
 }
@@ -186,16 +199,20 @@ export function loadPatch(id: string): Patch {
   ensureLayout();
   for (const base of [INTERNAL_PATCHES_DIR, PATCHES_DIR]) {
     const dir = path.join(base, id);
-    if (fs.existsSync(path.join(dir, "spec.json"))) return loadFromDir(dir);
+    if (patchDefinitionPath(dir)) return loadFromDir(dir);
   }
   throw new Error(`No patch named ${id}`);
 }
 
 export function saveSpec(patch: Patch, spec: PatchSpec): void {
-  fs.writeFileSync(
-    path.join(patch.dir, "spec.json"),
-    `${JSON.stringify(spec, null, 2)}\n`,
-  );
+  if (patch.source === "markdown") {
+    fs.writeFileSync(path.join(patch.dir, "PATCH.md"), renderPatchMd(patch, spec));
+  } else {
+    fs.writeFileSync(
+      path.join(patch.dir, "spec.json"),
+      `${JSON.stringify(spec, null, 2)}\n`,
+    );
+  }
   patch.spec = spec;
 }
 
@@ -205,6 +222,13 @@ export function removePatchDir(id: string): void {
 
 function loadFromDir(dir: string): Patch {
   const id = path.basename(dir);
+  const patchMd = path.join(dir, "PATCH.md");
+  if (fs.existsSync(patchMd)) {
+    const patch = parsePatchMd(dir, fs.readFileSync(patchMd, "utf8"));
+    validateSpec(patch.id, patch.spec);
+    return patch;
+  }
+
   const specPath = path.join(dir, "spec.json");
   const intentPath = path.join(dir, "intent.md");
   const spec = JSON.parse(fs.readFileSync(specPath, "utf8")) as PatchSpec;
@@ -216,12 +240,257 @@ function loadFromDir(dir: string): Patch {
       ? fs.readFileSync(intentPath, "utf8")
       : "",
     spec,
+    source: "json",
   };
+}
+
+function patchDefinitionPath(dir: string): string | undefined {
+  const patchMd = path.join(dir, "PATCH.md");
+  if (fs.existsSync(patchMd)) return patchMd;
+  const specJson = path.join(dir, "spec.json");
+  return fs.existsSync(specJson) ? specJson : undefined;
+}
+
+function parsePatchMd(dir: string, markdown: string): Patch {
+  const fallbackId = path.basename(dir);
+  const { attrs, body, bodyOffset } = parseFrontmatter(markdown);
+  const id = stringAttr(attrs.id) ?? fallbackId;
+  if (id !== fallbackId)
+    throw new Error(`${fallbackId}: PATCH.md id must match its directory name`);
+  const title = body.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? id;
+  const parsed = parseMarkdownEdits(id, body, bodyOffset);
+  return {
+    id,
+    dir,
+    // PATCH.md prose is agent-facing and intentionally free-form. Mechanical
+    // code only reads frontmatter and fenced edit blocks.
+    intent: markdown.trim(),
+    spec: { version: 1, files: parsed.files },
+    source: "markdown",
+    summary: stringAttr(attrs.summary),
+    title,
+    markdown,
+    markdownBlocks: parsed.blocks,
+  };
+}
+
+function parseFrontmatter(markdown: string): {
+  attrs: Record<string, string>;
+  body: string;
+  bodyOffset: number;
+} {
+  if (!markdown.startsWith("---\n"))
+    return { attrs: {}, body: markdown, bodyOffset: 0 };
+  const end = markdown.indexOf("\n---", 4);
+  if (end === -1) return { attrs: {}, body: markdown, bodyOffset: 0 };
+  const raw = markdown.slice(4, end).trim();
+  const attrs: Record<string, string> = {};
+  for (const line of raw.split(/\r?\n/)) {
+    const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+    if (match) attrs[match[1]!] = match[2]!.replace(/^['"]|['"]$/g, "");
+  }
+  let bodyOffset = end + 5;
+  if (markdown.slice(bodyOffset).startsWith("\n")) bodyOffset++;
+  return { attrs, body: markdown.slice(bodyOffset), bodyOffset };
+}
+
+function stringAttr(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function parseMarkdownEdits(
+  id: string,
+  body: string,
+  bodyOffset: number,
+): { files: FileEntry[]; blocks: MarkdownEditBlock[] } {
+  const byTarget = new Map<string, Replacement[]>();
+  const targetOrder: string[] = [];
+  const blocks: MarkdownEditBlock[] = [];
+
+  for (const fence of markdownFences(body)) {
+    const target = targetFromFenceInfo(fence.info);
+    if (!target) continue; // prose/example fence, not a mechanical edit
+
+    const replacement =
+      parseSearchReplaceBlock(fence.content) ?? parseDiffBlock(fence.content);
+    if (!replacement)
+      throw new Error(
+        `${id}: ${target}: fence is neither a search/replace nor a hunk block`,
+      );
+
+    const anchorHint = noteBefore(body.slice(0, fence.start));
+    if (anchorHint) replacement.anchorHint = anchorHint;
+    if (!byTarget.has(target)) targetOrder.push(target);
+    const replacements = byTarget.get(target) ?? [];
+    const fileIndex = targetOrder.indexOf(target);
+    const replacementIndex = replacements.length;
+    replacements.push(replacement);
+    byTarget.set(target, replacements);
+    blocks.push({
+      start: bodyOffset + fence.start,
+      end: bodyOffset + fence.end,
+      fileIndex,
+      replacementIndex,
+      target,
+    });
+  }
+
+  return {
+    files: targetOrder.map((target) => ({
+      target,
+      replacements: byTarget.get(target) ?? [],
+    })),
+    blocks,
+  };
+}
+
+function markdownFences(markdown: string): Array<{
+  start: number;
+  end: number;
+  info: string;
+  content: string;
+}> {
+  const fences: Array<{
+    start: number;
+    end: number;
+    info: string;
+    content: string;
+  }> = [];
+  let pos = 0;
+
+  while (pos < markdown.length) {
+    const lineStart = pos;
+    const lineEnd = markdown.indexOf("\n", lineStart);
+    const lineStop = lineEnd === -1 ? markdown.length : lineEnd;
+    const line = markdown.slice(lineStart, lineStop);
+    const open = line.match(/^\s{0,3}(`{3,})(.*)$/);
+    pos = lineEnd === -1 ? markdown.length : lineEnd + 1;
+    if (!open) continue;
+
+    const tickCount = open[1]!.length;
+    const info = open[2]!.trim();
+    const contentStart = pos;
+    let closeStart = -1;
+    let closeEnd = -1;
+
+    while (pos < markdown.length) {
+      const candidateStart = pos;
+      const candidateLineEnd = markdown.indexOf("\n", candidateStart);
+      const candidateStop =
+        candidateLineEnd === -1 ? markdown.length : candidateLineEnd;
+      const candidate = markdown.slice(candidateStart, candidateStop);
+      pos = candidateLineEnd === -1 ? markdown.length : candidateLineEnd + 1;
+      if (new RegExp(`^\\s{0,3}\`{${tickCount},}\\s*$`).test(candidate)) {
+        closeStart = candidateStart;
+        closeEnd = candidateStop;
+        break;
+      }
+    }
+
+    if (closeStart === -1) break;
+    let content = markdown.slice(contentStart, closeStart);
+    if (content.endsWith("\n")) content = content.slice(0, -1);
+    fences.push({ start: lineStart, end: closeEnd, info, content });
+  }
+
+  return fences;
+}
+
+function targetFromFenceInfo(info: string): string | undefined {
+  const match = info.match(/(?:^|\s)file=("[^"]+"|'[^']+'|\S+)/);
+  if (!match) return undefined;
+  return match[1]!.replace(/^['"]|['"]$/g, "").trim() || undefined;
+}
+
+function noteBefore(prefix: string): string | undefined {
+  return prefix.match(/(?:^|\n)>\s*note:\s*([^\n]+)\n\s*$/i)?.[1]?.trim();
+}
+
+function parseSearchReplaceBlock(block: string): Replacement | null {
+  const match = block.match(
+    /^<<<<<<< SEARCH\r?\n([\s\S]*?)^=======\r?\n([\s\S]*?)^>>>>>>> REPLACE\s*$/m,
+  );
+  return match ? { oldText: match[1]!, newText: match[2]! } : null;
+}
+
+function parseDiffBlock(block: string): Replacement | null {
+  const lines = block.split(/\r?\n/);
+
+  const oldLines: string[] = [];
+  const newLines: string[] = [];
+  let changed = false;
+  for (const line of lines) {
+    if (/^@@.*@@$/.test(line)) continue;
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      newLines.push(line.slice(1));
+      changed = true;
+    } else if (line.startsWith("-") && !line.startsWith("---")) {
+      oldLines.push(line.slice(1));
+      changed = true;
+    } else {
+      oldLines.push(line);
+      newLines.push(line);
+    }
+  }
+
+  if (!changed) return null;
+  const oldText = oldLines.length ? `${oldLines.join("\n")}\n` : "";
+  const newText = newLines.length ? `${newLines.join("\n")}\n` : "";
+  return { oldText, newText };
+}
+
+function renderPatchMd(patch: Patch, spec: PatchSpec): string {
+  if (patch.markdown && patch.markdownBlocks?.length) {
+    let markdown = patch.markdown;
+    for (const block of [...patch.markdownBlocks].sort((a, b) => b.start - a.start)) {
+      const replacement = spec.files[block.fileIndex]?.replacements[block.replacementIndex];
+      if (!replacement) continue;
+      markdown = `${markdown.slice(0, block.start)}${renderSearchReplaceFence(
+        block.target,
+        replacement,
+      )}${markdown.slice(block.end)}`;
+    }
+    return markdown.endsWith("\n") ? markdown : `${markdown}\n`;
+  }
+
+  const title = patch.title ?? patch.id;
+  const summary = patch.summary ?? title;
+  const out: string[] = [
+    "---",
+    `id: ${patch.id}`,
+    `summary: ${summary}`,
+    "---",
+    "",
+    `# ${title}`,
+    "",
+    patch.intent.trim(),
+    "",
+  ];
+  for (const file of spec.files) {
+    for (const replacement of file.replacements)
+      out.push(renderSearchReplaceFence(file.target, replacement), "");
+  }
+  return `${out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd()}\n`;
+}
+
+function renderSearchReplaceFence(
+  target: string,
+  replacement: Replacement,
+): string {
+  return [
+    `\`\`\`patch file=${target}`,
+    "<<<<<<< SEARCH",
+    replacement.oldText.replace(/\n$/, ""),
+    "=======",
+    replacement.newText.replace(/\n$/, ""),
+    ">>>>>>> REPLACE",
+    "```",
+  ].join("\n");
 }
 
 function validateSpec(id: string, spec: PatchSpec): void {
   if (!Array.isArray(spec.files) || spec.files.length === 0)
-    throw new Error(`${id}: spec.json must have a non-empty "files" array`);
+    throw new Error(`${id}: patch must define at least one edit`);
   for (const file of spec.files) {
     if (!file.target || !Array.isArray(file.replacements))
       throw new Error(`${id}: each file needs a target and replacements`);
@@ -431,6 +700,11 @@ export function derivePatch(
 }
 
 // ── Internal ─────────────────────────────────────────────────
+function replaceDir(src: string, dst: string): void {
+  fs.rmSync(dst, { recursive: true, force: true });
+  copyDir(src, dst, true);
+}
+
 function copyDir(src: string, dst: string, overwrite = false): void {
   fs.mkdirSync(dst, { recursive: true });
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {

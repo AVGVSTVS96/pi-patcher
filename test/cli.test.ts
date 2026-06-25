@@ -35,7 +35,7 @@ describe("pi-patcher CLI", () => {
 
     // The bundled patch is seeded into internal-patches/, NOT the user dir,
     // and its baseSha is recorded so future shipped fixes can be detected.
-    expect(fs.existsSync(path.join(internalDir(ctx, "bootstrap-hook"), "spec.json"))).toBe(true);
+    expect(fs.existsSync(path.join(internalDir(ctx, "bootstrap-hook"), "PATCH.md"))).toBe(true);
     expect(fs.existsSync(path.join(ctx.home, ".pi", "patches", "bootstrap-hook"))).toBe(false);
     expect(readState(ctx).internalBaseShas["bootstrap-hook"]).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -439,6 +439,140 @@ describe("pi-patcher CLI", () => {
     expect(spec.files[0].replacements[1].newText).toContain("beta-healed");
   });
 
+  test("PATCH.md patches apply from fenced edits with file metadata", () => {
+    const ctx = makeFakePi({ packageManagerCli: originalPackageManagerCli });
+    const target = path.join(ctx.piRoot, "dist", "patch-md.js");
+    fs.writeFileSync(target, "const value = 1;\n");
+    writePatchMd(
+      ctx,
+      "patch-md",
+      `---
+id: patch-md
+summary: freeform markdown patch
+version: 0.1.0
+lastUpdated: 2026-06-25
+---
+
+# Freeform patch
+
+Any prose works here; no required section names.
+
+This example fence is prose, not a mechanical edit, because it has no file metadata:
+
+\`\`\`diff
+@@ example only @@
+old
++new
+\`\`\`
+
+\`\`\`diff file=dist/patch-md.js
+-const value = 1;
++const value = 2;
+\`\`\`
+`,
+    );
+
+    const result = runCli(ctx, ["reconcile"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("patch-md applied");
+    expect(fs.readFileSync(target, "utf8")).toBe("const value = 2;\n");
+  });
+
+  test("heal prompt is seeded from the PATCH.md source of truth", () => {
+    const ctx = makeFakePi({
+      packageManagerCli: originalPackageManagerCli,
+      healScript: [
+        'cat > "$HOME/heal-prompt.txt"',
+        'printf "===ABORT===\\ncaptured prompt\\n===END===\\n"',
+        "exit 0",
+      ].join("\n"),
+    });
+    const target = path.join(ctx.piRoot, "dist", "prompt-source.js");
+    fs.writeFileSync(target, "const value = 3;\n");
+    writePatchMd(
+      ctx,
+      "prompt-source",
+      `---
+id: prompt-source
+summary: prompt should include full PATCH.md
+---
+
+# Prompt source
+
+This prose is the source of truth for healing.
+
+\`\`\`diff file=dist/prompt-source.js
+-const value = 1;
++const value = 2;
+\`\`\`
+`,
+    );
+
+    const result = runCli(ctx, ["reconcile"]);
+
+    expect(result.exitCode).toBe(1);
+    const prompt = fs.readFileSync(path.join(ctx.home, "heal-prompt.txt"), "utf8");
+    expect(prompt).toContain("Use the PATCH.md as the source of truth");
+    expect(prompt).toContain("Target file: ");
+    expect(prompt).toContain("# Prompt source");
+    expect(prompt).toContain("This prose is the source of truth for healing.");
+    expect(prompt).toContain("```diff file=dist/prompt-source.js");
+    expect(prompt).not.toContain("The replacement that failed");
+    expect(prompt).not.toContain('"oldText"');
+  });
+
+  test("healed PATCH.md patches preserve prose and rewrite the edit fence", () => {
+    const ctx = makeFakePi({
+      packageManagerCli: originalPackageManagerCli,
+      healScript: [
+        "PROMPT=$(cat)",
+        'TARGET=$(printf "%s" "$PROMPT" | sed -n "s/^Target file: //p" | head -n1)',
+        'printf "===PLAN===\\nrewrite md patch zone\\n===END===\\n"',
+        `printf 'const value = 4;\\n' > "$TARGET"`,
+        "exit 0",
+      ].join("\n"),
+    });
+    const target = path.join(ctx.piRoot, "dist", "patch-md-heal.js");
+    fs.writeFileSync(target, "const value = 3;\n");
+    writePatchMd(
+      ctx,
+      "patch-md-heal",
+      `---
+id: patch-md-heal
+summary: heal markdown patch
+version: 0.1.0
+lastUpdated: 2026-06-25
+---
+
+# Heal me
+
+Prose that should survive a healed edit.
+
+\`\`\`patch file=dist/patch-md-heal.js
+<<<<<<< SEARCH
+const value = 1;
+=======
+const value = 2;
+>>>>>>> REPLACE
+\`\`\`
+`,
+    );
+
+    const result = runCli(ctx, ["reconcile"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(fs.readFileSync(target, "utf8")).toBe("const value = 4;\n");
+    const patchMd = fs.readFileSync(
+      path.join(ctx.home, ".pi", "patches", "patch-md-heal", "PATCH.md"),
+      "utf8",
+    );
+    expect(patchMd).toContain("Prose that should survive");
+    expect(patchMd).toContain("```patch file=dist/patch-md-heal.js");
+    expect(patchMd).toContain("const value = 3;");
+    expect(patchMd).toContain("const value = 4;");
+  });
+
   test("text-only targets (.md) apply without validation", () => {
     const ctx = makeFakePi({ packageManagerCli: originalPackageManagerCli });
     const promptPath = path.join(ctx.piRoot, "dist", "system-prompt.md");
@@ -665,15 +799,13 @@ describe("pi-patcher CLI", () => {
     // Guards against regressing the original bug: pi's update output is ESM,
     // where `require` is undefined and the hook's try/catch swallows the
     // ReferenceError, silently never running reconcile.
-    const spec = JSON.parse(
-      fs.readFileSync(
-        path.join(repoRoot, "patches", "bootstrap-hook", "spec.json"),
-        "utf8",
-      ),
+    const patch = fs.readFileSync(
+      path.join(repoRoot, "patches", "bootstrap-hook", "PATCH.md"),
+      "utf8",
     );
-    const newText = spec.files[0].replacements[0].newText as string;
-    expect(newText).toContain("await import(");
-    expect(newText).not.toMatch(/\brequire\(/);
+    expect(patch).toContain("```diff file=dist/package-manager-cli.js");
+    expect(patch).toContain("await import(");
+    expect(patch).not.toMatch(/\brequire\(/);
   });
 });
 
@@ -847,6 +979,12 @@ function writePatch(ctx: FakePiContext, id: string, spec: unknown) {
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "intent.md"), `test patch ${id}\n`);
   fs.writeFileSync(path.join(dir, "spec.json"), `${JSON.stringify(spec, null, 2)}\n`);
+}
+
+function writePatchMd(ctx: FakePiContext, id: string, markdown: string) {
+  const dir = path.join(ctx.home, ".pi", "patches", id);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "PATCH.md"), markdown);
 }
 
 /**
