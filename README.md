@@ -67,12 +67,14 @@ JavaScript and JSON targets are syntax-checked after every edit. Any file type (
 When the literal `oldText`/`newText` no longer matches, pi-patcher hands the work to pi:
 
 - the target file is snapshotted first
-- `pi -p --model ${PI_PATCHER_HEAL_MODEL:-openai-codex/gpt-5.5:low} --session-dir <heal-sessions>/<id>-<ts>/` is invoked with `prompts/heal.md` on stdin
+- `pi -p --model ${PI_PATCHER_HEAL_MODEL:-openai-codex/gpt-5.5:low} --session-id <id>` is invoked with `prompts/heal.md` on stdin
+- pi uses your normal session storage, so heal sessions remain discoverable anywhere `pi --session <id>` can find them
+- pi-patcher shows a small progress spinner while the headless heal runs, but suppresses raw nested pi output by default
 - the result is syntax-checked (JS / JSON only); the snapshot is restored on failure
-- if pi decides the change is out of scope (feature removed, would require a redesign), it emits `===ABORT===` and pi-patcher rolls back cleanly
+- if pi decides the change is out of scope (feature removed, would require a redesign), it emits `===ABORT===` internally and pi-patcher prints the abort reason once
 - on success, pi-patcher derives a fresh `oldText`/`newText` from the AI's edit and saves it to `spec.json`
 
-Every session is saved and its path is logged; replay with `pi --session <path>`.
+Each heal prints the short replay command, e.g. `pi --session 019efc67-5d7d-75f1-b395-62e7ccc0eda0`.
 
 ## Uninstalling
 
