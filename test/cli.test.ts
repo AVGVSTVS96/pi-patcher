@@ -21,8 +21,9 @@ describe("pi-patcher CLI", () => {
     const result = runCli(ctx, ["init"]);
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("pi-patcher: seeded internal patch bootstrap-hook");
-    expect(result.stdout).toContain("pi-patcher: applied bootstrap-hook");
+    expect(result.stdout).toContain("pi-patcher\n");
+    expect(result.stdout).toContain("seeded internal patch bootstrap-hook");
+    expect(result.stdout).toContain("bootstrap-hook applied");
     expect(result.stdout).toContain("pi-patcher is wired into pi update");
     expect(result.stdout).toContain("To remove cleanly later, run: pi-patcher uninstall");
 
@@ -55,8 +56,8 @@ describe("pi-patcher CLI", () => {
 
     expect(result.exitCode).toBe(0);
     // Internal patch applied from internal-patches/, user patch from ~/.pi/patches/.
-    expect(result.stdout).toContain("pi-patcher: applied bootstrap-hook");
-    expect(result.stdout).toContain("pi-patcher: applied user-tweak");
+    expect(result.stdout).toContain("bootstrap-hook applied");
+    expect(result.stdout).toContain("user-tweak applied");
     expect(fs.readFileSync(path.join(ctx.piRoot, "dist", "user.js"), "utf8")).toBe(
       "const x = 2;\n",
     );
@@ -72,7 +73,7 @@ describe("pi-patcher CLI", () => {
     const result = runBundledCli(ctx, ["init"]);
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("pi-patcher: applied bootstrap-hook");
+    expect(result.stdout).toContain("bootstrap-hook applied");
     expect(fs.readFileSync(ctx.packageManagerCliPath, "utf8")).toContain(
       'import("node:child_process")',
     );
@@ -116,8 +117,8 @@ describe("pi-patcher CLI", () => {
     const result = runCli(ctx, ["init"]);
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("pi-patcher: seeded internal patch bootstrap-hook");
-    expect(result.stdout).toContain("pi-patcher: applied bootstrap-hook");
+    expect(result.stdout).toContain("seeded internal patch bootstrap-hook");
+    expect(result.stdout).toContain("bootstrap-hook applied");
     expect(fs.existsSync(internalDir(ctx, "bootstrap-hook"))).toBe(true);
   });
 
@@ -286,7 +287,7 @@ describe("pi-patcher CLI", () => {
     const result = runCli(ctx, ["reconcile"]);
 
     expect(result.exitCode).toBe(1);
-    expect(result.stdout).toContain("pi-patcher: bad-syntax failed:");
+    expect(result.stdout).toContain("bad-syntax failed:");
     expect(fs.readFileSync(badTarget, "utf8")).toBe("const x = 1;\n");
   });
 
@@ -321,7 +322,7 @@ describe("pi-patcher CLI", () => {
     const result = runCli(ctx, ["reconcile"]);
 
     expect(result.exitCode).toBe(1);
-    expect(result.stdout).toContain("pi-patcher: twin-fail failed:");
+    expect(result.stdout).toContain("twin-fail failed:");
     expect(result.stdout).toContain("expected exactly one occurrence of oldText");
     // file-a was written then rolled back; file-b was never touched.
     expect(fs.readFileSync(aPath, "utf8")).toBe("const a = 1;\n");
@@ -345,11 +346,19 @@ describe("pi-patcher CLI", () => {
 
     expect(result.exitCode).toBe(1);
     expect(result.stdout).toContain("Reason: upstream moved the update flow");
+    expect(result.stdout).not.toContain("===ABORT===");
+    expect(result.stdout.match(/upstream moved the update flow/g)?.length).toBe(1);
     expect(fs.readFileSync(ctx.packageManagerCliPath, "utf8")).toBe(drifted);
     const state = JSON.parse(
       fs.readFileSync(path.join(ctx.home, ".pi", "pi-patcher", "state.json"), "utf8"),
     );
     expect(state.patches["bootstrap-hook"].lastError).toBe("upstream moved the update flow");
+    expect(state.patches["bootstrap-hook"].lastSessions[0]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+    expect(result.stdout).toContain(
+      `Inspect: pi --session ${state.patches["bootstrap-hook"].lastSessions[0]}`,
+    );
   });
 
   // ── Heal correctness ─────────────────────────────────────
@@ -440,7 +449,7 @@ describe("pi-patcher CLI", () => {
     const result = runCli(ctx, ["reconcile"]);
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("pi-patcher: applied prompt-tweak");
+    expect(result.stdout).toContain("prompt-tweak applied");
     expect(fs.readFileSync(promptPath, "utf8")).toBe(
       "You are a coding agent.\nBe terse and accurate. Always use British spelling.\n",
     );
@@ -463,8 +472,8 @@ describe("pi-patcher CLI", () => {
     const result = runCli(ctx, ["uninstall"]);
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("pi-patcher: reverted bootstrap-hook");
-    expect(result.stdout).toContain("pi-patcher: reverted user-tweak");
+    expect(result.stdout).toContain("bootstrap-hook reverted");
+    expect(result.stdout).toContain("user-tweak reverted");
     expect(result.stdout).toContain("npm uninstall -g pi-patcher");
     expect(result.stdout).toContain("fake npm: uninstall -g pi-patcher");
 
@@ -506,7 +515,7 @@ describe("pi-patcher CLI", () => {
     const result = runCli(ctx, ["uninstall"]);
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("pi-patcher: skipped will-drift (drifted");
+    expect(result.stdout).toContain("will-drift skipped (drifted");
     expect(result.stdout).toContain("with caveats");
     expect(result.stdout).toContain("fake npm: uninstall -g pi-patcher");
     expect(fs.readFileSync(path.join(ctx.piRoot, "dist", "drifted.js"), "utf8")).toBe(

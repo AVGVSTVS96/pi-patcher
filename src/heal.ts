@@ -20,6 +20,7 @@ import {
   recordHealed,
   rememberSession,
 } from "./state.js";
+import { logDetail, logFailure, logSuccess, logWarn, ui } from "./ui.js";
 
 /**
  * Re-anchor every drifted replacement in a patch by handing each one to
@@ -64,13 +65,11 @@ async function healOne(
   const before = fs.readFileSync(target, "utf8");
 
   const label = healLabel(patch, fi, ri);
-  say(`pi-patcher: ${label} drifted. Self-healing\u2026`);
+  logWarn(`${label} drifted`);
 
   const sessionId = crypto.randomUUID();
 
-  const stopSpinner = startSpinner(
-    `pi-patcher: healing ${label} with ${HEAL_MODEL}`,
-  );
+  const stopSpinner = startSpinner(`healing ${label} with ${HEAL_MODEL}`);
   const child = await runPiHeal(
     ["-p", "--model", HEAL_MODEL, "--session-id", sessionId],
     renderPrompt(patch, target, replacement),
@@ -83,10 +82,9 @@ async function healOne(
   const fail = (reason: string) => {
     fs.writeFileSync(target, before);
     recordError(state, patch.id, reason);
-    say(
-      `pi-patcher: ${label} not healed. Inspect: pi --session ${sessionId}`,
-    );
-    say(`Reason: ${reason}`);
+    logFailure(`${label} not healed`);
+    logDetail(`Reason: ${reason}`);
+    logDetail(`Inspect: ${ui.cyan(`pi --session ${sessionId}`)}`);
     return false;
   };
 
@@ -119,9 +117,8 @@ async function healOne(
 
   rewriteReplacement(patch, fi, ri, derived);
   recordHealed(state, patch.id);
-  say(
-    `pi-patcher: ${label} healed. Session: pi --session ${sessionId}`,
-  );
+  logSuccess(`${label} healed`);
+  logDetail(`Inspect: ${ui.cyan(`pi --session ${sessionId}`)}`);
   return true;
 }
 
@@ -176,16 +173,16 @@ function runPiHeal(args: string[], input: string): Promise<HealProcessResult> {
 
 function startSpinner(message: string): () => void {
   if (!process.stdout.isTTY) {
-    say(`${message}…`);
+    console.log(`  ${ui.dim("…")} ${message}…`);
     return () => undefined;
   }
 
-  const frames = ["[33m◐[0m", "[33m◓[0m", "[33m◑[0m", "[33m◒[0m"];
+  const frames = ["◐", "◓", "◑", "◒"].map(ui.yellow);
   const start = Date.now();
   let i = 0;
   const render = () => {
     const elapsed = Math.floor((Date.now() - start) / 1000);
-    process.stdout.write(`\r${frames[i++ % frames.length]} ${message} (${elapsed}s)`);
+    process.stdout.write(`\r  ${frames[i++ % frames.length]} ${message} (${elapsed}s)`);
   };
   render();
   const timer = setInterval(render, 120);
@@ -245,6 +242,3 @@ function rewriteReplacement(
   saveSpec(patch, newSpec);
 }
 
-function say(message: string): void {
-  console.log(message);
-}

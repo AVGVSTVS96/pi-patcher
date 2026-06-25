@@ -29,6 +29,14 @@ import {
   saveState,
 } from "./state.js";
 import { heal } from "./heal.js";
+import {
+  logApplied,
+  logFailure,
+  logHeader,
+  logInfo,
+  logSuccess,
+  logWarn,
+} from "./ui.js";
 
 main(process.argv.slice(2)).then(
   (code) => {
@@ -118,6 +126,7 @@ function version(): string {
  */
 async function cmdReconcile(): Promise<number> {
   return await withSession(async (piRoot, state) => {
+    logHeader();
     state.internalBaseShas ??= {};
     logSyncEvents(syncInternalPatches(state.internalBaseShas, "refresh-only"));
     const summary = await applyAll(piRoot, state);
@@ -133,6 +142,8 @@ type RunSummary = {
   failed: number;
 };
 
+class ReportedPatchFailure extends Error {}
+
 /**
  * Reconcile every discovered patch, accumulating a summary. Always logs a
  * one-line result so a `pi update`-triggered reconcile shows what pi-patcher
@@ -147,7 +158,8 @@ async function applyAll(piRoot: string, state: State): Promise<RunSummary> {
       summary.failed++;
       const message = msg(error);
       recordError(state, patch.id, message);
-      console.log(`pi-patcher: ${patch.id} failed: ${message}`);
+      if (!(error instanceof ReportedPatchFailure))
+        logFailure(`${patch.id} failed: ${message}`);
     }
   }
   return summary;
@@ -164,22 +176,22 @@ async function reconcileOne(
       return "current";
     case "pending": {
       if (applyEdits(patch, piRoot)) recordApplied(state, patch.id);
-      console.log(`pi-patcher: applied ${patch.id}`);
+      logApplied(patch.id);
       return "applied";
     }
     case "drift":
       if (!(await heal(patch, piRoot, state)))
-        throw new Error(patchError(state, patch.id) ?? "heal failed");
+        throw new ReportedPatchFailure(patchError(state, patch.id) ?? "heal failed");
       return "healed";
   }
 }
 
 function logSyncEvents(events: SyncEvent[]): void {
   for (const e of events)
-    console.log(
+    logInfo(
       e.action === "seeded"
-        ? `pi-patcher: seeded internal patch ${e.id}`
-        : `pi-patcher: refreshed internal patch ${e.id} (shipped update)`,
+        ? `seeded internal patch ${e.id}`
+        : `refreshed internal patch ${e.id} (shipped update)`,
     );
 }
 
@@ -189,9 +201,7 @@ function logSummary(s: RunSummary): void {
   if (s.healed) parts.push(`${s.healed} healed`);
   if (s.current) parts.push(`${s.current} already current`);
   if (s.failed) parts.push(`${s.failed} failed`);
-  console.log(
-    `pi-patcher: ${parts.length ? parts.join(", ") : "no patches to apply"}`,
-  );
+  console.log(`  ${parts.length ? parts.join(", ") : "no patches to apply"}`);
 }
 
 async function cmdList(): Promise<number> {
@@ -259,6 +269,7 @@ async function cmdRemove(id: string): Promise<number> {
  */
 async function cmdInit(): Promise<number> {
   return await withSession(async (piRoot, state) => {
+    logHeader();
     state.internalBaseShas ??= {};
     logSyncEvents(syncInternalPatches(state.internalBaseShas, "seed"));
     const summary = await applyAll(piRoot, state);
@@ -293,18 +304,14 @@ async function cmdUninstall(): Promise<number> {
         const status = statusOf(patch, piRoot);
         if (status === "applied") {
           revertEdits(patch, piRoot);
-          console.log(`pi-patcher: reverted ${patch.id}`);
+          logSuccess(`${patch.id} reverted`);
         } else if (status === "drift") {
           issues++;
-          console.log(
-            `pi-patcher: skipped ${patch.id} (drifted; file already modified upstream, left as-is)`,
-          );
+          logWarn(`${patch.id} skipped (drifted; file already modified upstream, left as-is)`);
         }
       } catch (error) {
         issues++;
-        console.log(
-          `pi-patcher: ${patch.id} revert failed: ${msg(error)} (continuing)`,
-        );
+        logFailure(`${patch.id} revert failed: ${msg(error)} (continuing)`);
       }
       // Remove by the patch's actual directory so managed patches are deleted
       // from internal-patches/, not just user patches from ~/.pi/patches/.
