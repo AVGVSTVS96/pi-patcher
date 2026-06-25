@@ -102,7 +102,19 @@ describe("pi-patcher CLI", () => {
 
     const second = runCli(ctx, ["reconcile"]);
     expect(second.exitCode).toBe(0);
+    expect(second.stdout).toContain("bootstrap-hook already current");
     expect(fs.readFileSync(ctx.packageManagerCliPath, "utf8")).toBe(afterInit);
+  });
+
+  test("list uses the section output and shows applied patches", () => {
+    const ctx = makeFakePi({ packageManagerCli: originalPackageManagerCli });
+    expect(runCli(ctx, ["init"]).exitCode).toBe(0);
+
+    const result = runCli(ctx, ["list"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("pi-patcher\n");
+    expect(result.stdout).toContain("bootstrap-hook applied");
   });
 
   test("init re-seeds an internal patch whose working copy was deleted", () => {
@@ -334,9 +346,10 @@ describe("pi-patcher CLI", () => {
 
   test("an aborted heal during reconcile is saved in state", () => {
     const drifted = `async function update() {\n  console.log("updated pi");\n}\n`;
+    const reason = "upstream moved the update flow into a different file and restoring the patch would require editing outside the constrained target file";
     const ctx = makeFakePi({
       packageManagerCli: drifted,
-      healScript: 'printf "===ABORT===\\nupstream moved the update flow\\n===END===\\n"\nexit 0',
+      healScript: `printf "===ABORT===\\n${reason}\\n===END===\\n"\nexit 0`,
     });
     // Install bootstrap-hook into the patches dir without applying it
     // (the file is already drifted, so `init` would route through heal).
@@ -346,13 +359,14 @@ describe("pi-patcher CLI", () => {
 
     expect(result.exitCode).toBe(1);
     expect(result.stdout).toContain("Reason: upstream moved the update flow");
+    expect(result.stdout).toContain("\n            ");
     expect(result.stdout).not.toContain("===ABORT===");
     expect(result.stdout.match(/upstream moved the update flow/g)?.length).toBe(1);
     expect(fs.readFileSync(ctx.packageManagerCliPath, "utf8")).toBe(drifted);
     const state = JSON.parse(
       fs.readFileSync(path.join(ctx.home, ".pi", "pi-patcher", "state.json"), "utf8"),
     );
-    expect(state.patches["bootstrap-hook"].lastError).toBe("upstream moved the update flow");
+    expect(state.patches["bootstrap-hook"].lastError).toBe(reason);
     expect(state.patches["bootstrap-hook"].lastSessions[0]).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
     );

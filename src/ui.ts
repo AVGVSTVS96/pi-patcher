@@ -39,3 +39,40 @@ export function logInfo(message: string): void {
 export function logDetail(message: string): void {
   console.log(`    ${message}`);
 }
+
+export function logLabeledDetail(label: string, text: string): void {
+  const firstPrefix = `    ${label}: `;
+  const nextPrefix = " ".repeat(firstPrefix.length);
+  const columns = process.stdout.columns ?? 100;
+  const lines = wrapWords(text, Math.max(20, columns - firstPrefix.length));
+
+  if (lines.length === 0) {
+    console.log(firstPrefix.trimEnd());
+    return;
+  }
+
+  console.log(`${firstPrefix}${lines[0]}`);
+  for (const line of wrapWords(
+    lines.slice(1).join(" "),
+    Math.max(20, columns - nextPrefix.length),
+  ))
+    console.log(`${nextPrefix}${line}`);
+}
+
+function wrapWords(text: string, width: number): string[] {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let line = "";
+
+  for (const word of words) {
+    if (!line) line = word;
+    else if (line.length + 1 + word.length <= width) line += ` ${word}`;
+    else {
+      lines.push(line);
+      line = word;
+    }
+  }
+
+  if (line) lines.push(line);
+  return lines;
+}

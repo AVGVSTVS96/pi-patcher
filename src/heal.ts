@@ -20,7 +20,7 @@ import {
   recordHealed,
   rememberSession,
 } from "./state.js";
-import { logDetail, logFailure, logSuccess, logWarn, ui } from "./ui.js";
+import { logDetail, logFailure, logLabeledDetail, logSuccess, logWarn, ui } from "./ui.js";
 
 /**
  * Re-anchor every drifted replacement in a patch by handing each one to
@@ -82,7 +82,7 @@ async function healOne(
     recordError(state, patch.id, reason);
     if (inspect) rememberSession(state, patch.id, sessionId);
     logFailure(`${label} not healed`);
-    logDetail(`Reason: ${reason}`);
+    logLabeledDetail("Reason", reason);
     if (inspect) logDetail(`Inspect: ${ui.cyan(`pi --session ${sessionId}`)}`);
     return false;
   };

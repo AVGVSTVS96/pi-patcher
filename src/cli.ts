@@ -34,6 +34,7 @@ import {
   logFailure,
   logHeader,
   logInfo,
+  logLabeledDetail,
   logSuccess,
   logWarn,
 } from "./ui.js";
@@ -173,6 +174,7 @@ async function reconcileOne(
   switch (statusOf(patch, piRoot)) {
     case "applied":
       delete state.patches[patch.id]?.lastError;
+      logSuccess(`${patch.id} already current`);
       return "current";
     case "pending": {
       if (applyEdits(patch, piRoot)) recordApplied(state, patch.id);
@@ -206,14 +208,26 @@ function logSummary(s: RunSummary): void {
 
 async function cmdList(): Promise<number> {
   return await withSession((piRoot, state) => {
+    logHeader();
+    let found = false;
     for (const patch of allPatches()) {
+      found = true;
+      const status = statusOf(patch, piRoot);
+      if (status === "applied") logSuccess(`${patch.id} applied`);
+      else if (status === "pending") logInfo(`${patch.id} pending`);
+      else logWarn(`${patch.id} drifted`);
+
       const session = lastSession(state, patch.id);
-      console.log(
-        `${patch.id.padEnd(20)} ${statusOf(patch, piRoot)}${session ? `\t${session}` : ""}`,
-      );
+      if (session) logLabeledDetail("Last heal", `pi --session ${sessionArg(session)}`);
     }
+    if (!found) console.log("  no patches found");
     return 0;
   });
+}
+
+function sessionArg(session: string): string {
+  const base = path.basename(session).replace(/\.jsonl$/, "");
+  return base.includes("_") ? base.slice(base.lastIndexOf("_") + 1) : base;
 }
 
 async function cmdHeal(id: string): Promise<number> {
