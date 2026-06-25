@@ -30,14 +30,17 @@ import {
 } from "./state.js";
 import { heal } from "./heal.js";
 
-try {
-  process.exitCode = main(process.argv.slice(2));
-} catch (error) {
-  console.error(`pi-patcher: ${msg(error)}`);
-  process.exitCode = 1;
-}
+main(process.argv.slice(2)).then(
+  (code) => {
+    process.exitCode = code;
+  },
+  (error) => {
+    console.error(`pi-patcher: ${msg(error)}`);
+    process.exitCode = 1;
+  },
+);
 
-function main(argv: string[]): number {
+async function main(argv: string[]): Promise<number> {
   if (argv.length === 0) {
     console.log(helpText());
     return 0;
@@ -45,17 +48,17 @@ function main(argv: string[]): number {
   const [cmd, ...rest] = argv;
   switch (cmd) {
     case "init":
-      return cmdInit();
+      return await cmdInit();
     case "reconcile":
-      return cmdReconcile();
+      return await cmdReconcile();
     case "list":
-      return cmdList();
+      return await cmdList();
     case "heal":
-      return cmdHeal(requireArg(rest[0], "heal <id>"));
+      return await cmdHeal(requireArg(rest[0], "heal <id>"));
     case "remove":
-      return cmdRemove(requireArg(rest[0], "remove <id>"));
+      return await cmdRemove(requireArg(rest[0], "remove <id>"));
     case "uninstall":
-      return cmdUninstall();
+      return await cmdUninstall();
     case "help":
     case "--help":
     case "-h":
@@ -113,11 +116,11 @@ function version(): string {
  * `reconcile` without a prior `init` stays a no-op, but a shipped fix lands
  * automatically the next time `pi update` runs reconcile.
  */
-function cmdReconcile(): number {
-  return withSession((piRoot, state) => {
+async function cmdReconcile(): Promise<number> {
+  return await withSession(async (piRoot, state) => {
     state.internalBaseShas ??= {};
     logSyncEvents(syncInternalPatches(state.internalBaseShas, "refresh-only"));
-    const summary = applyAll(piRoot, state);
+    const summary = await applyAll(piRoot, state);
     logSummary(summary);
     return summary.failed ? 1 : 0;
   });
@@ -135,11 +138,11 @@ type RunSummary = {
  * one-line result so a `pi update`-triggered reconcile shows what pi-patcher
  * did or found, even when everything is already up to date.
  */
-function applyAll(piRoot: string, state: State): RunSummary {
+async function applyAll(piRoot: string, state: State): Promise<RunSummary> {
   const summary: RunSummary = { applied: 0, healed: 0, current: 0, failed: 0 };
   for (const patch of allPatches()) {
     try {
-      summary[reconcileOne(patch, piRoot, state)]++;
+      summary[await reconcileOne(patch, piRoot, state)]++;
     } catch (error) {
       summary.failed++;
       const message = msg(error);
@@ -150,11 +153,11 @@ function applyAll(piRoot: string, state: State): RunSummary {
   return summary;
 }
 
-function reconcileOne(
+async function reconcileOne(
   patch: Patch,
   piRoot: string,
   state: State,
-): "applied" | "healed" | "current" {
+): Promise<"applied" | "healed" | "current"> {
   switch (statusOf(patch, piRoot)) {
     case "applied":
       delete state.patches[patch.id]?.lastError;
@@ -165,7 +168,7 @@ function reconcileOne(
       return "applied";
     }
     case "drift":
-      if (!heal(patch, piRoot, state))
+      if (!(await heal(patch, piRoot, state)))
         throw new Error(patchError(state, patch.id) ?? "heal failed");
       return "healed";
   }
@@ -191,8 +194,8 @@ function logSummary(s: RunSummary): void {
   );
 }
 
-function cmdList(): number {
-  return withSession((piRoot, state) => {
+async function cmdList(): Promise<number> {
+  return await withSession((piRoot, state) => {
     for (const patch of allPatches()) {
       const session = lastSession(state, patch.id);
       console.log(
@@ -203,9 +206,9 @@ function cmdList(): number {
   });
 }
 
-function cmdHeal(id: string): number {
-  return withSession((piRoot, state) =>
-    heal(loadPatch(id), piRoot, state) ? 0 : 1,
+async function cmdHeal(id: string): Promise<number> {
+  return await withSession(async (piRoot, state) =>
+    (await heal(loadPatch(id), piRoot, state)) ? 0 : 1,
   );
 }
 
@@ -215,8 +218,8 @@ function cmdHeal(id: string): number {
  * with a non-zero exit so the user can resolve the file manually before
  * retrying. No AI revert — keep removal predictable.
  */
-function cmdRemove(id: string): number {
-  return withSession((piRoot, state) => {
+async function cmdRemove(id: string): Promise<number> {
+  return await withSession((piRoot, state) => {
     if (isInternalPatch(id))
       throw new Error(
         `${id} is managed by pi-patcher; use \`pi-patcher uninstall\` to remove it`,
@@ -254,11 +257,11 @@ function cmdRemove(id: string): number {
  * No `postinstall` hook runs this automatically — we explicitly want the
  * user to opt in to mutating their pi install.
  */
-function cmdInit(): number {
-  return withSession((piRoot, state) => {
+async function cmdInit(): Promise<number> {
+  return await withSession(async (piRoot, state) => {
     state.internalBaseShas ??= {};
     logSyncEvents(syncInternalPatches(state.internalBaseShas, "seed"));
-    const summary = applyAll(piRoot, state);
+    const summary = await applyAll(piRoot, state);
     logSummary(summary);
     if (!summary.failed) {
       console.log("");
@@ -282,8 +285,8 @@ function cmdInit(): number {
  * the patch folder anyway and tell the user. They explicitly asked to
  * uninstall; we shouldn't block on a broken patch.
  */
-function cmdUninstall(): number {
-  const cleanupExit = withSession((piRoot, state) => {
+async function cmdUninstall(): Promise<number> {
+  const cleanupExit = await withSession((piRoot, state) => {
     let issues = 0;
     for (const patch of allPatches()) {
       try {
@@ -327,14 +330,16 @@ function cmdUninstall(): number {
 }
 
 // ── Session ──────────────────────────────────────────────────
-function withSession<T>(fn: (piRoot: string, state: State) => T): T {
+async function withSession<T>(
+  fn: (piRoot: string, state: State) => T | Promise<T>,
+): Promise<T> {
   ensureLayout();
   const piRoot = findPiRoot();
   const state = loadState();
   state.piRoot = piRoot;
   state.lastRunAt = new Date().toISOString();
   try {
-    return fn(piRoot, state);
+    return await fn(piRoot, state);
   } finally {
     saveState(state);
   }
