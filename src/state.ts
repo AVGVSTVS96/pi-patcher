@@ -8,6 +8,9 @@ export type PatchState = {
   lastRevertedAt?: string;
   lastError?: string;
   lastSessions?: string[];
+  // Set when a heal aborts because restoring the intent needs a structural
+  // redesign (tier 3). Cleared on any successful apply/heal/revert.
+  needsRedesign?: boolean;
 };
 
 export type State = {
@@ -37,18 +40,33 @@ export function recordApplied(state: State, id: string): void {
   const entry = entryFor(state, id);
   entry.lastAppliedAt = new Date().toISOString();
   delete entry.lastError;
+  delete entry.needsRedesign;
 }
 
 export function recordReverted(state: State, id: string): void {
   const entry = entryFor(state, id);
   entry.lastRevertedAt = new Date().toISOString();
   delete entry.lastError;
+  delete entry.needsRedesign;
 }
 
 export function recordHealed(state: State, id: string): void {
   const entry = entryFor(state, id);
   entry.lastHealedAt = new Date().toISOString();
   delete entry.lastError;
+  delete entry.needsRedesign;
+}
+
+export function recordNeedsRedesign(state: State, id: string): void {
+  entryFor(state, id).needsRedesign = true;
+}
+
+export function clearNeedsRedesign(state: State, id: string): void {
+  delete state.patches[id]?.needsRedesign;
+}
+
+export function needsRedesign(state: State, id: string): boolean {
+  return state.patches[id]?.needsRedesign === true;
 }
 
 export function recordError(state: State, id: string, message: string): void {

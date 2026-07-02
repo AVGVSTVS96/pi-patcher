@@ -22,21 +22,25 @@ import {
   forgetPatch,
   lastSession,
   loadState,
-  patchError,
+  needsRedesign,
   recordApplied,
   recordError,
   recordReverted,
   saveState,
 } from "./state.js";
-import { heal } from "./heal.js";
+import { heal, redesign, renderRedesignPrompt } from "./heal.js";
 import {
+  copyToClipboard,
   logApplied,
+  logDetail,
   logFailure,
   logHeader,
   logInfo,
   logLabeledDetail,
   logSuccess,
   logWarn,
+  select,
+  ui,
 } from "./ui.js";
 
 main(process.argv.slice(2)).then(
@@ -59,11 +63,11 @@ async function main(argv: string[]): Promise<number> {
     case "init":
       return await cmdInit();
     case "reconcile":
-      return await cmdReconcile();
+      return await cmdReconcile(rest);
     case "list":
       return await cmdList();
     case "heal":
-      return await cmdHeal(requireArg(rest[0], "heal <id>"));
+      return await cmdHeal(rest);
     case "remove":
       return await cmdRemove(requireArg(rest[0], "remove <id>"));
     case "uninstall":
@@ -92,8 +96,10 @@ Self-healing patches for pi.
 Usage:
   pi-patcher init             Install bundled patches and wire into \`pi update\`
   pi-patcher reconcile        Apply pending patches; heal drifted ones
+      --redesign              For patches needing a redesign, fix them autonomously
+      --prompt                For patches needing a redesign, print a prompt to drive yourself
   pi-patcher list             Show status and most recent heal session
-  pi-patcher heal <id>        Re-anchor a drifted patch via AI
+  pi-patcher heal <id>        Re-anchor a drifted patch via AI (accepts --redesign/--prompt)
   pi-patcher remove <id>      Revert edits and delete the patch folder
   pi-patcher uninstall        Revert every patch and uninstall the npm package
 
@@ -121,46 +127,74 @@ function version(): string {
  * to the AI heal flow. Exits non-zero if any patch fails so users notice
  * after `pi update`.
  *
- * Internal (bundled) patches are refreshed first — refresh-only, so a bare
- * `reconcile` without a prior `init` stays a no-op, but a shipped fix lands
+ * Internal (bundled) patches are refreshed first, and in refresh-only mode a
+ * bare `reconcile` without a prior `init` stays a no-op, but a shipped fix lands
  * automatically the next time `pi update` runs reconcile.
  */
-async function cmdReconcile(): Promise<number> {
+async function cmdReconcile(args: string[]): Promise<number> {
+  const policy = tier3Policy(args);
   return await withSession(async (piRoot, state) => {
     logHeader();
     state.internalBaseShas ??= {};
     logSyncEvents(syncInternalPatches(state.internalBaseShas, "refresh-only"));
-    const summary = await applyAll(piRoot, state);
+    const summary = await applyAll(piRoot, state, policy);
     logSummary(summary);
-    return summary.failed ? 1 : 0;
+    return summary.failed || summary.needsRedesign ? 1 : 0;
   });
+}
+
+/**
+ * What to do with a patch whose heal aborted (tier 3: needs a redesign):
+ *   - ask:      interactive picker (default when attached to a TTY)
+ *   - report:   print a resolve hint, leave it (default when non-interactive)
+ *   - redesign: autonomously re-author + verify the patch (`--redesign`)
+ *   - prompt:   print a ready-to-paste prompt for an interactive pi (`--prompt`)
+ */
+type Tier3Policy = "ask" | "report" | "redesign" | "prompt";
+
+function tier3Policy(args: string[]): Tier3Policy {
+  if (args.includes("--redesign")) return "redesign";
+  if (args.includes("--prompt")) return "prompt";
+  return process.stdin.isTTY ? "ask" : "report";
 }
 
 type RunSummary = {
   applied: number;
   healed: number;
+  redesigned: number;
   current: number;
+  needsRedesign: number;
   failed: number;
 };
 
-class ReportedPatchFailure extends Error {}
+type ReconcileOutcome = keyof RunSummary;
 
 /**
  * Reconcile every discovered patch, accumulating a summary. Always logs a
  * one-line result so a `pi update`-triggered reconcile shows what pi-patcher
  * did or found, even when everything is already up to date.
  */
-async function applyAll(piRoot: string, state: State): Promise<RunSummary> {
-  const summary: RunSummary = { applied: 0, healed: 0, current: 0, failed: 0 };
+async function applyAll(
+  piRoot: string,
+  state: State,
+  policy: Tier3Policy,
+): Promise<RunSummary> {
+  const summary: RunSummary = {
+    applied: 0,
+    healed: 0,
+    redesigned: 0,
+    current: 0,
+    needsRedesign: 0,
+    failed: 0,
+  };
   for (const patch of allPatches()) {
     try {
-      summary[await reconcileOne(patch, piRoot, state)]++;
+      summary[await reconcileOne(patch, piRoot, state, policy)]++;
     } catch (error) {
       summary.failed++;
       const message = msg(error);
       recordError(state, patch.id, message);
-      if (!(error instanceof ReportedPatchFailure))
-        logFailure(`${patch.id} failed: ${message}`);
+      logFailure(`${patch.id} failed: ${message}`);
     }
   }
   return summary;
@@ -170,10 +204,12 @@ async function reconcileOne(
   patch: Patch,
   piRoot: string,
   state: State,
-): Promise<"applied" | "healed" | "current"> {
+  policy: Tier3Policy,
+): Promise<ReconcileOutcome> {
   switch (statusOf(patch, piRoot)) {
     case "applied":
       delete state.patches[patch.id]?.lastError;
+      delete state.patches[patch.id]?.needsRedesign;
       logSuccess(`${patch.id} already current`);
       return "current";
     case "pending": {
@@ -181,11 +217,70 @@ async function reconcileOne(
       logApplied(patch.id);
       return "applied";
     }
-    case "drift":
-      if (!(await heal(patch, piRoot, state)))
-        throw new ReportedPatchFailure(patchError(state, patch.id) ?? "heal failed");
-      return "healed";
+    case "drift": {
+      const result = await heal(patch, piRoot, state);
+      if (result.kind === "healed") return "healed";
+      if (result.kind === "failed") return "failed";
+      return await resolveTier3(patch, piRoot, state, policy);
+    }
   }
+}
+
+/**
+ * Route a patch whose heal aborted. The heal already logged the abort reason
+ * and inspect session; here we only act on the chosen policy.
+ */
+async function resolveTier3(
+  patch: Patch,
+  piRoot: string,
+  state: State,
+  policy: Tier3Policy,
+): Promise<ReconcileOutcome> {
+  switch (policy) {
+    case "redesign":
+      return (await redesign(patch, piRoot, state)) ? "redesigned" : "failed";
+    case "prompt":
+      console.log(`\n${renderRedesignPrompt(patch, piRoot)}\n`);
+      return "needsRedesign";
+    case "report":
+      logResolveHint(patch.id);
+      return "needsRedesign";
+    case "ask": {
+      const choice = await select(
+        `${patch.id} needs a redesign`,
+        ["A minimal heal can't re-anchor this; the patch needs reworking."],
+        [
+          { label: "Redesign automatically", hint: "agent re-authors the patch, verified by apply" },
+          { label: "Copy prompt to clipboard", hint: "fix it yourself in pi, then re-run reconcile" },
+          { label: "Skip", hint: "leave as needs-redesign" },
+        ],
+      );
+      if (choice === 0)
+        return (await redesign(patch, piRoot, state)) ? "redesigned" : "failed";
+      if (choice === 1) {
+        copyPrompt(patch, piRoot);
+        return "needsRedesign";
+      }
+      logResolveHint(patch.id);
+      return "needsRedesign";
+    }
+  }
+}
+
+function copyPrompt(patch: Patch, piRoot: string): void {
+  const prompt = renderRedesignPrompt(patch, piRoot);
+  if (copyToClipboard(prompt))
+    logDetail("Prompt copied, paste it into `pi`, then re-run `pi-patcher reconcile`.");
+  else {
+    logDetail("Couldn't reach a clipboard. Copy the prompt below into `pi`:");
+    console.log(`\n${prompt}\n`);
+  }
+}
+
+function logResolveHint(id: string): void {
+  logDetail(
+    `Resolve: ${ui.cyan(`pi-patcher heal ${id} --redesign`)} (auto-fix) or ${ui.cyan("--prompt")} (drive it yourself)`,
+  );
 }
 
 function logSyncEvents(events: SyncEvent[]): void {
@@ -201,7 +296,9 @@ function logSummary(s: RunSummary): void {
   const parts: string[] = [];
   if (s.applied) parts.push(`${s.applied} applied`);
   if (s.healed) parts.push(`${s.healed} healed`);
+  if (s.redesigned) parts.push(`${s.redesigned} redesigned`);
   if (s.current) parts.push(`${s.current} already current`);
+  if (s.needsRedesign) parts.push(`${s.needsRedesign} need redesign`);
   if (s.failed) parts.push(`${s.failed} failed`);
   console.log(`  ${parts.length ? parts.join(", ") : "no patches to apply"}`);
 }
@@ -215,6 +312,7 @@ async function cmdList(): Promise<number> {
       const status = statusOf(patch, piRoot);
       if (status === "applied") logSuccess(`${patch.id} applied`);
       else if (status === "pending") logInfo(`${patch.id} pending`);
+      else if (needsRedesign(state, patch.id)) logWarn(`${patch.id} needs redesign`);
       else logWarn(`${patch.id} drifted`);
 
       const session = lastSession(state, patch.id);
@@ -230,17 +328,24 @@ function sessionArg(session: string): string {
   return base.includes("_") ? base.slice(base.lastIndexOf("_") + 1) : base;
 }
 
-async function cmdHeal(id: string): Promise<number> {
-  return await withSession(async (piRoot, state) =>
-    (await heal(loadPatch(id), piRoot, state)) ? 0 : 1,
-  );
+async function cmdHeal(args: string[]): Promise<number> {
+  const id = args.find((a) => !a.startsWith("-"));
+  if (!id) throw new Error("Usage: pi-patcher heal <id> [--redesign|--prompt]");
+  const policy = tier3Policy(args);
+  return await withSession(async (piRoot, state) => {
+    const patch = loadPatch(id);
+    const result = await heal(patch, piRoot, state);
+    if (result.kind === "healed") return 0;
+    if (result.kind === "failed") return 1;
+    return (await resolveTier3(patch, piRoot, state, policy)) === "redesigned" ? 0 : 1;
+  });
 }
 
 /**
  * Revert the patch's mechanical edits, then delete the folder and forget
  * its state. If the file has drifted (newText no longer matches), bail out
  * with a non-zero exit so the user can resolve the file manually before
- * retrying. No AI revert — keep removal predictable.
+ * retrying. No AI revert keeps removal predictable.
  */
 async function cmdRemove(id: string): Promise<number> {
   return await withSession((piRoot, state) => {
@@ -272,13 +377,13 @@ async function cmdRemove(id: string): Promise<number> {
 }
 
 /**
- * `pi-patcher init` — the single user-facing command for opting into
+ * `pi-patcher init`: the single user-facing command for opting into
  * pi-patcher's modifications to your pi install. Seeds the bundled patches
  * (currently just `bootstrap-hook`) into `~/.pi/pi-patcher/internal-patches/`,
  * then applies them. Idempotent: safe to re-run after upgrades to pick up
  * newly-bundled patches or shipped fixes (seed + refresh).
  *
- * No `postinstall` hook runs this automatically — we explicitly want the
+ * No `postinstall` hook runs this automatically, since we explicitly want the
  * user to opt in to mutating their pi install.
  */
 async function cmdInit(): Promise<number> {
@@ -286,23 +391,23 @@ async function cmdInit(): Promise<number> {
     logHeader();
     state.internalBaseShas ??= {};
     logSyncEvents(syncInternalPatches(state.internalBaseShas, "seed"));
-    const summary = await applyAll(piRoot, state);
+    const summary = await applyAll(piRoot, state, tier3Policy([]));
     logSummary(summary);
-    if (!summary.failed) {
+    if (!summary.failed && !summary.needsRedesign) {
       console.log("");
       console.log("pi-patcher is wired into pi update.");
       console.log("To remove cleanly later, run: pi-patcher uninstall");
     }
-    return summary.failed ? 1 : 0;
+    return summary.failed || summary.needsRedesign ? 1 : 0;
   });
 }
 
 /**
- * `pi-patcher uninstall` — the single user-facing command for tearing
+ * `pi-patcher uninstall`: the single user-facing command for tearing
  * pi-patcher down. Reverts every applied patch (skipping drifted ones,
  * since the user has already modified those files), deletes every patch
- * folder — user patches under `~/.pi/patches/` and managed ones under
- * `~/.pi/pi-patcher/internal-patches/` alike — forgets state, then runs
+ * folder, including user patches under `~/.pi/patches/` and managed ones under
+ * `~/.pi/pi-patcher/internal-patches/` alike, forgets state, then runs
  * `npm uninstall -g pi-patcher`.
  *
  * Drift is not a hard error: if the user has a custom patch whose target

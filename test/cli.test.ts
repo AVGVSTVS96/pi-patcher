@@ -2,7 +2,6 @@ import { afterEach, describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { count, derivePatch } from "../src/patches.js";
 
 const repoRoot = path.resolve(import.meta.dir, "..");
 const cleanups: string[] = [];
@@ -375,11 +374,316 @@ describe("pi-patcher CLI", () => {
     );
   });
 
+  // ── Tier 2: cross-file retarget ──────────────────────────
+  test("heal retargets a patch to a sibling file when the anchor moved", () => {
+    // The declared target no longer holds the anchor. It moved, unchanged,
+    // into a sibling file under the same package. The agent rewrites the
+    // spec's target itself; pi-patcher applies the retargeted spec.
+    const ctx = makeFakePi({
+      packageManagerCli: originalPackageManagerCli,
+      healScript: [
+        "PROMPT=$(cat)",
+        'SPEC=$(printf "%s" "$PROMPT" | sed -n "s/^Patch spec file: //p" | head -n1)',
+        'printf "===PLAN===\\nretarget\\n===END===\\n"',
+        `printf '%s' '{"version":1,"files":[{"target":"dist/moved-new.js","replacements":[{"oldText":"export const moved = 1;\\n","newText":"export const moved = 2;\\n"}]}]}' > "$SPEC"`,
+        "exit 0",
+      ].join("\n"),
+    });
+    fs.writeFileSync(path.join(ctx.piRoot, "dist", "moved-old.js"), "// the code moved away\n");
+    fs.writeFileSync(path.join(ctx.piRoot, "dist", "moved-new.js"), "export const moved = 1;\n");
+    writePatch(ctx, "moved", {
+      files: [
+        {
+          target: "dist/moved-old.js",
+          replacements: [
+            { oldText: "export const moved = 1;\n", newText: "export const moved = 2;\n" },
+          ],
+        },
+      ],
+    });
+
+    const result = runCli(ctx, ["reconcile"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("moved healed");
+    expect(fs.readFileSync(path.join(ctx.piRoot, "dist", "moved-new.js"), "utf8")).toBe(
+      "export const moved = 2;\n",
+    );
+    // The old target is left untouched; the spec now points at the new file.
+    expect(fs.readFileSync(path.join(ctx.piRoot, "dist", "moved-old.js"), "utf8")).toBe(
+      "// the code moved away\n",
+    );
+    const spec = JSON.parse(
+      fs.readFileSync(path.join(ctx.home, ".pi", "patches", "moved", "spec.json"), "utf8"),
+    );
+    expect(spec.files[0].target).toBe("dist/moved-new.js");
+    expect(spec.files[0].replacements[0].newText).toBe("export const moved = 2;\n");
+  });
+
+  // ── Tier 3: redesign routing ─────────────────────────────
+  test("reconcile --redesign autonomously re-authors an aborted patch and applies it", () => {
+    const ctx = makeFakePi({
+      packageManagerCli: originalPackageManagerCli,
+      healScript: [
+        "PROMPT=$(cat)",
+        'case "$PROMPT" in',
+        '  *"You are redesigning"*)',
+        '    SPEC=$(printf "%s" "$PROMPT" | sed -n "s/^Patch spec file: //p" | head -n1)',
+        `    printf '%s' '{"version":1,"files":[{"target":"dist/redesign-target.js","replacements":[{"oldText":"const v = \\"new-shape\\";\\n","newText":"const v = \\"redesigned\\";\\n"}]}]}' > "$SPEC"`,
+        '    printf "===PLAN===\\nrework\\n===END===\\n"',
+        "    exit 0;;",
+        "  *)",
+        '    printf "===ABORT===\\nneeds redesign\\n===END===\\n"',
+        "    exit 0;;",
+        "esac",
+      ].join("\n"),
+    });
+    fs.writeFileSync(
+      path.join(ctx.piRoot, "dist", "redesign-target.js"),
+      'const v = "new-shape";\n',
+    );
+    writePatch(ctx, "shape", {
+      files: [
+        {
+          target: "dist/redesign-target.js",
+          replacements: [
+            { oldText: 'const v = "old";\n', newText: 'const v = "patched";\n' },
+          ],
+        },
+      ],
+    });
+
+    const result = runCli(ctx, ["reconcile", "--redesign"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("shape redesigned");
+    expect(result.stdout).toContain("1 redesigned");
+    expect(fs.readFileSync(path.join(ctx.piRoot, "dist", "redesign-target.js"), "utf8")).toBe(
+      'const v = "redesigned";\n',
+    );
+    expect(readState(ctx).patches["shape"].needsRedesign).toBeUndefined();
+  });
+
+  test("reconcile --prompt prints a redesign prompt and leaves the patch for the user", () => {
+    const ctx = makeFakePi({
+      packageManagerCli: originalPackageManagerCli,
+      healScript: 'printf "===ABORT===\\nneeds redesign\\n===END===\\n"\nexit 0',
+    });
+    fs.writeFileSync(path.join(ctx.piRoot, "dist", "hand.js"), "const x = 9;\n");
+    writePatch(ctx, "handoff", {
+      files: [
+        {
+          target: "dist/hand.js",
+          replacements: [{ oldText: "const x = 1;\n", newText: "const x = 2;\n" }],
+        },
+      ],
+    });
+
+    const result = runCli(ctx, ["reconcile", "--prompt"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain("You are redesigning");
+    expect(result.stdout).toContain("Patch id: handoff");
+    expect(result.stdout).toContain("1 need redesign");
+    // Untouched: the user drives the fix themselves.
+    expect(fs.readFileSync(path.join(ctx.piRoot, "dist", "hand.js"), "utf8")).toBe("const x = 9;\n");
+    expect(readState(ctx).patches["handoff"].needsRedesign).toBe(true);
+  });
+
+  test("list flags a patch that needs a redesign", () => {
+    const ctx = makeFakePi({
+      packageManagerCli: originalPackageManagerCli,
+      healScript: 'printf "===ABORT===\\nneeds redesign\\n===END===\\n"\nexit 0',
+    });
+    fs.writeFileSync(path.join(ctx.piRoot, "dist", "flag.js"), "const x = 9;\n");
+    writePatch(ctx, "flagged", {
+      files: [
+        {
+          target: "dist/flag.js",
+          replacements: [{ oldText: "const x = 1;\n", newText: "const x = 2;\n" }],
+        },
+      ],
+    });
+    expect(runCli(ctx, ["reconcile"]).exitCode).toBe(1);
+
+    const result = runCli(ctx, ["list"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("flagged needs redesign");
+  });
+
+  test("heal surfaces the agent's plan as a resolved step while it works", () => {
+    const ctx = makeFakePi({
+      packageManagerCli: originalPackageManagerCli,
+      healScript: [
+        "PROMPT=$(cat)",
+        'SPEC=$(printf "%s" "$PROMPT" | sed -n "s/^Patch spec file: //p" | head -n1)',
+        'printf "===PLAN===\\nRelocating the greeting constant.\\n===END===\\n"',
+        `printf '%s' '{"version":1,"files":[{"target":"dist/plan.js","replacements":[{"oldText":"const g = \\"drifted\\";\\n","newText":"const g = \\"healed\\";\\n"}]}]}' > "$SPEC"`,
+        "exit 0",
+      ].join("\n"),
+    });
+    fs.writeFileSync(path.join(ctx.piRoot, "dist", "plan.js"), 'const g = "drifted";\n');
+    writePatch(ctx, "planme", {
+      files: [
+        {
+          target: "dist/plan.js",
+          replacements: [{ oldText: 'const g = "orig";\n', newText: 'const g = "patched";\n' }],
+        },
+      ],
+    });
+
+    const result = runCli(ctx, ["reconcile"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("planning planme");
+    expect(result.stdout).toContain("Relocating the greeting constant.");
+    expect(result.stdout).toContain("rewriting planme's spec");
+    expect(result.stdout).toContain("planme healed");
+    expect(fs.readFileSync(path.join(ctx.piRoot, "dist", "plan.js"), "utf8")).toBe(
+      'const g = "healed";\n',
+    );
+  });
+
+  // ── The spec-writing contract ────────────────────────────
+  test("scratch edits in the source are reverted; only the rewritten spec is durable", () => {
+    // The agent may trial its change in the source (edit files, create new
+    // ones), but pi-patcher restores everything except the spec, then applies
+    // the spec mechanically from the clean base.
+    const ctx = makeFakePi({
+      packageManagerCli: originalPackageManagerCli,
+      healScript: [
+        "PROMPT=$(cat)",
+        'SPEC=$(printf "%s" "$PROMPT" | sed -n "s/^Patch spec file: //p" | head -n1)',
+        'ROOT=$(printf "%s" "$PROMPT" | sed -n "s/^Package root: //p" | head -n1)',
+        'printf "===PLAN===\\ntrial in source, then rewrite the spec\\n===END===\\n"',
+        `printf 'const s = "scratch";\\n' > "$ROOT/dist/sibling.js"`,
+        `printf 'left behind\\n' > "$ROOT/dist/scratch-file.js"`,
+        `printf '%s' '{"version":1,"files":[{"target":"dist/scratchy.js","replacements":[{"oldText":"const v = \\"drifted\\";\\n","newText":"const v = \\"healed\\";\\n"}]}]}' > "$SPEC"`,
+        "exit 0",
+      ].join("\n"),
+    });
+    fs.writeFileSync(path.join(ctx.piRoot, "dist", "scratchy.js"), 'const v = "drifted";\n');
+    fs.writeFileSync(path.join(ctx.piRoot, "dist", "sibling.js"), 'const s = "orig";\n');
+    writePatch(ctx, "scratchy", {
+      files: [
+        {
+          target: "dist/scratchy.js",
+          replacements: [{ oldText: 'const v = "orig";\n', newText: 'const v = "patched";\n' }],
+        },
+      ],
+    });
+
+    const result = runCli(ctx, ["reconcile"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("scratchy healed");
+    expect(fs.readFileSync(path.join(ctx.piRoot, "dist", "scratchy.js"), "utf8")).toBe(
+      'const v = "healed";\n',
+    );
+    // The trial edit is rolled back and the created file is deleted.
+    expect(fs.readFileSync(path.join(ctx.piRoot, "dist", "sibling.js"), "utf8")).toBe(
+      'const s = "orig";\n',
+    );
+    expect(fs.existsSync(path.join(ctx.piRoot, "dist", "scratch-file.js"))).toBe(false);
+  });
+
+  test("a spec that fails verification is retried once in the same session", () => {
+    // Attempt 1 writes a spec that can't anchor; pi-patcher resumes the same
+    // session with the exact failure, and attempt 2 fixes the spec.
+    const ctx = makeFakePi({
+      packageManagerCli: originalPackageManagerCli,
+      healScript: [
+        "PROMPT=$(cat)",
+        'SPEC=$(printf "%s" "$PROMPT" | sed -n "s/^Patch spec file: //p" | head -n1)',
+        'echo "$5" >> "$HOME/session-ids.txt"',
+        'if [ -f "$HOME/attempt-1" ]; then',
+        '  printf "%s" "$PROMPT" > "$HOME/retry-prompt.txt"',
+        '  SPEC=$(cat "$HOME/spec-path.txt")',
+        `  printf '%s' '{"version":1,"files":[{"target":"dist/retry.js","replacements":[{"oldText":"const r = \\"drifted\\";\\n","newText":"const r = \\"healed\\";\\n"}]}]}' > "$SPEC"`,
+        "else",
+        '  touch "$HOME/attempt-1"',
+        '  printf "%s" "$SPEC" > "$HOME/spec-path.txt"',
+        '  printf "===PLAN===\\nfirst try\\n===END===\\n"',
+        `  printf '%s' '{"version":1,"files":[{"target":"dist/retry.js","replacements":[{"oldText":"no such anchor\\n","newText":"const r = \\"healed\\";\\n"}]}]}' > "$SPEC"`,
+        "fi",
+        "exit 0",
+      ].join("\n"),
+    });
+    fs.writeFileSync(path.join(ctx.piRoot, "dist", "retry.js"), 'const r = "drifted";\n');
+    writePatch(ctx, "retry", {
+      files: [
+        {
+          target: "dist/retry.js",
+          replacements: [{ oldText: 'const r = "orig";\n', newText: 'const r = "patched";\n' }],
+        },
+      ],
+    });
+
+    const result = runCli(ctx, ["reconcile"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("retry attempt 1 did not verify; retrying");
+    expect(result.stdout).toContain("retry healed");
+    expect(fs.readFileSync(path.join(ctx.piRoot, "dist", "retry.js"), "utf8")).toBe(
+      'const r = "healed";\n',
+    );
+    // Same session resumed, corrective prompt carries the exact failure.
+    const sessions = fs
+      .readFileSync(path.join(ctx.home, "session-ids.txt"), "utf8")
+      .trim()
+      .split("\n");
+    expect(sessions).toHaveLength(2);
+    expect(sessions[0]).toBe(sessions[1]);
+    const retryPrompt = fs.readFileSync(path.join(ctx.home, "retry-prompt.txt"), "utf8");
+    expect(retryPrompt).toContain("did not verify");
+    expect(retryPrompt).toContain("the rewritten spec did not apply");
+  });
+
+  test("a spec that still fails after the retry is rolled back entirely", () => {
+    const ctx = makeFakePi({
+      packageManagerCli: originalPackageManagerCli,
+      healScript: [
+        "PROMPT=$(cat)",
+        'SPEC=$(printf "%s" "$PROMPT" | sed -n "s/^Patch spec file: //p" | head -n1)',
+        '[ -f "$HOME/spec-path.txt" ] && SPEC=$(cat "$HOME/spec-path.txt")',
+        'printf "%s" "$SPEC" > "$HOME/spec-path.txt"',
+        `printf '%s' '{"version":1,"files":[{"target":"dist/hopeless.js","replacements":[{"oldText":"no such anchor\\n","newText":"const h = \\"healed\\";\\n"}]}]}' > "$SPEC"`,
+        "exit 0",
+      ].join("\n"),
+    });
+    fs.writeFileSync(path.join(ctx.piRoot, "dist", "hopeless.js"), 'const h = "drifted";\n');
+    writePatch(ctx, "hopeless", {
+      files: [
+        {
+          target: "dist/hopeless.js",
+          replacements: [{ oldText: 'const h = "orig";\n', newText: 'const h = "patched";\n' }],
+        },
+      ],
+    });
+    const specPath = path.join(ctx.home, ".pi", "patches", "hopeless", "spec.json");
+    const specBefore = fs.readFileSync(specPath, "utf8");
+
+    const result = runCli(ctx, ["reconcile"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain("hopeless not healed");
+    expect(result.stdout).toContain("the rewritten spec did not apply");
+    // Both the spec and the target are back to where they started.
+    expect(fs.readFileSync(specPath, "utf8")).toBe(specBefore);
+    expect(fs.readFileSync(path.join(ctx.piRoot, "dist", "hopeless.js"), "utf8")).toBe(
+      'const h = "drifted";\n',
+    );
+    expect(readState(ctx).patches["hopeless"].lastError).toContain(
+      "the rewritten spec did not apply",
+    );
+  });
+
   // ── Heal correctness ─────────────────────────────────────
-  test("heal handles multi-replacement patches per-entry, leaving applied ones alone", () => {
-    // The file already has replacement[0] applied. Replacement[1]'s old/new
-    // text is nowhere to be found — drift. Heal must touch only [1] and
-    // rewrite only [1] in the spec.
+  test("heal applies a multi-replacement spec, leaving already-applied entries alone", () => {
+    // The file already has replacement[0] applied while [1] drifted. The
+    // agent rewrites the whole spec; on apply, [0] classifies as applied and
+    // is skipped, [1] anchors against the drifted text and is applied.
     const fileText =
       `console.log("alpha-applied");\n` +
       `console.log("beta-drifted-zone");\n`;
@@ -387,9 +691,9 @@ describe("pi-patcher CLI", () => {
       packageManagerCli: originalPackageManagerCli,
       healScript: [
         "PROMPT=$(cat)",
-        'TARGET=$(printf "%s" "$PROMPT" | sed -n "s/^Target file: //p" | head -n1)',
+        'SPEC=$(printf "%s" "$PROMPT" | sed -n "s/^Patch spec file: //p" | head -n1)',
         'printf "===PLAN===\\nrewrite beta zone\\n===END===\\n"',
-        `printf 'console.log("alpha-applied");\\nconsole.log("beta-healed");\\n' > "$TARGET"`,
+        `printf '%s' '{"version":1,"files":[{"target":"dist/multi.js","replacements":[{"oldText":"console.log(\\"alpha-original\\");\\n","newText":"console.log(\\"alpha-applied\\");\\n"},{"oldText":"console.log(\\"beta-drifted-zone\\");\\n","newText":"console.log(\\"beta-healed\\");\\n"}]}]}' > "$SPEC"`,
         "exit 0",
       ].join("\n"),
     });
@@ -416,9 +720,8 @@ describe("pi-patcher CLI", () => {
     const result = runCli(ctx, ["reconcile"]);
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("multi (dist/multi.js#1) drifted");
-    expect(result.stdout).toContain("multi (dist/multi.js#1) healed");
-    expect(result.stdout).not.toContain("multi (dist/multi.js#0)");
+    expect(result.stdout).toContain("multi drifted");
+    expect(result.stdout).toContain("multi healed");
 
     const patched = fs.readFileSync(
       path.join(ctx.piRoot, "dist", "multi.js"),
@@ -513,23 +816,42 @@ This prose is the source of truth for healing.
 
     expect(result.exitCode).toBe(1);
     const prompt = fs.readFileSync(path.join(ctx.home, "heal-prompt.txt"), "utf8");
-    expect(prompt).toContain("Use the PATCH.md as the source of truth");
-    expect(prompt).toContain("Target file: ");
+    expect(prompt).toContain("Use the patch spec as the source of truth");
+    expect(prompt).toContain(
+      `Patch spec file: ${path.join(ctx.home, ".pi", "patches", "prompt-source", "PATCH.md")}`,
+    );
     expect(prompt).toContain("# Prompt source");
     expect(prompt).toContain("This prose is the source of truth for healing.");
     expect(prompt).toContain("```diff file=dist/prompt-source.js");
-    expect(prompt).not.toContain("The replacement that failed");
+    expect(prompt).not.toContain("{{");
     expect(prompt).not.toContain('"oldText"');
   });
 
-  test("healed PATCH.md patches preserve prose and rewrite the edit fence", () => {
+  test("an agent-rewritten PATCH.md is applied verbatim, prose and all", () => {
     const ctx = makeFakePi({
       packageManagerCli: originalPackageManagerCli,
       healScript: [
         "PROMPT=$(cat)",
-        'TARGET=$(printf "%s" "$PROMPT" | sed -n "s/^Target file: //p" | head -n1)',
+        'SPEC=$(printf "%s" "$PROMPT" | sed -n "s/^Patch spec file: //p" | head -n1)',
         'printf "===PLAN===\\nrewrite md patch zone\\n===END===\\n"',
-        `printf 'const value = 4;\\n' > "$TARGET"`,
+        'cat > "$SPEC" <<\'EOF\'',
+        "---",
+        "id: patch-md-heal",
+        "summary: heal markdown patch",
+        "---",
+        "",
+        "# Heal me",
+        "",
+        "Prose that should survive a healed edit.",
+        "",
+        "```patch file=dist/patch-md-heal.js",
+        "<<<<<<< SEARCH",
+        "const value = 3;",
+        "=======",
+        "const value = 4;",
+        ">>>>>>> REPLACE",
+        "```",
+        "EOF",
         "exit 0",
       ].join("\n"),
     });
@@ -809,56 +1131,6 @@ const value = 2;
   });
 });
 
-describe("derivePatch", () => {
-  test("derives a minimal line-level replacement", () => {
-    const before = "one\nfunction value() { return 1; }\ntwo\n";
-    const after = "one\nfunction value() { return 2; }\ntwo\n";
-
-    expect(derivePatch(before, after)).toEqual({
-      oldText: "function value() { return 1; }\n",
-      newText: "function value() { return 2; }\n",
-    });
-  });
-
-  test("spans multiple changed lines in a single replacement", () => {
-    const before = "head\nfoo();\nbar();\ntail\n";
-    const after = "head\nFOO();\nBAR();\ntail\n";
-
-    expect(derivePatch(before, after)).toEqual({
-      oldText: "foo();\nbar();\n",
-      newText: "FOO();\nBAR();\n",
-    });
-  });
-
-  test("handles an edit at EOF with no trailing newline", () => {
-    const before = "export const x = 1";
-    const after = "export const x = 2";
-
-    expect(derivePatch(before, after)).toEqual({
-      oldText: "export const x = 1",
-      newText: "export const x = 2",
-    });
-  });
-
-  test("grows the window until each side is uniquely anchored", () => {
-    // Two identical lines; only the second changes. A single-line window
-    // would be ambiguous (oldText appears twice), so derivePatch must grow
-    // until both sides are unique and the edit round-trips exactly.
-    const before = "val = 1;\nval = 1;\n";
-    const after = "val = 1;\nval = 2;\n";
-
-    const derived = derivePatch(before, after);
-    expect(derived).not.toBeNull();
-    expect(count(before, derived!.oldText)).toBe(1);
-    expect(count(after, derived!.newText)).toBe(1);
-    expect(before.replace(derived!.oldText, derived!.newText)).toBe(after);
-  });
-
-  test("returns null when nothing changed", () => {
-    expect(derivePatch("same\n", "same\n")).toBeNull();
-  });
-});
-
 // ── Fake pi environment ──────────────────────────────────────
 type FakePiContext = {
   home: string;
@@ -990,7 +1262,7 @@ function writePatchMd(ctx: FakePiContext, id: string, markdown: string) {
 /**
  * Copy a bundled patch from the repo's `patches/` dir into the fake pi
  * env's `~/.pi/patches/`. Used for tests that need the bundled patch
- * present but NOT yet applied — i.e. simulating "init has run, but the
+ * present but NOT yet applied, simulating "init has run, but the
  * file has since drifted."
  */
 function copyBundledPatch(ctx: FakePiContext, id: string) {

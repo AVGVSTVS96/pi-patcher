@@ -42,18 +42,6 @@ export type Patch = {
   intent: string;
   spec: PatchSpec;
   source: "markdown" | "json";
-  summary?: string;
-  title?: string;
-  markdown?: string;
-  markdownBlocks?: MarkdownEditBlock[];
-};
-
-type MarkdownEditBlock = {
-  start: number;
-  end: number;
-  fileIndex: number;
-  replacementIndex: number;
-  target: string;
 };
 
 export type Status = "applied" | "pending" | "drift";
@@ -62,7 +50,7 @@ export type Status = "applied" | "pending" | "drift";
 /**
  * Create the runtime directories pi-patcher needs (`~/.pi/patches/` for
  * user-authored patches and `~/.pi/pi-patcher/internal-patches/` for bundled patches).
- * This does NOT install bundled patches — that's an explicit opt-in via
+ * This does NOT install bundled patches, since that is an explicit opt-in via
  * `pi-patcher init`, so plain `npm install -g pi-patcher` never silently
  * mutates the user's pi install.
  */
@@ -167,7 +155,7 @@ export function resolveTarget(piRoot: string, target: string): string {
 // ── Loading ──────────────────────────────────────────────────
 //
 // Patch directories starting with `_` are skipped (manual tombstone escape
-// hatch — `mv id _id` if you want pi-patcher to ignore a patch without
+// hatch: `mv id _id` if you want pi-patcher to ignore a patch without
 // actually removing it). `pi-patcher remove` is the supported verb.
 
 export function allPatches(): Patch[] {
@@ -202,18 +190,6 @@ export function loadPatch(id: string): Patch {
     if (patchDefinitionPath(dir)) return loadFromDir(dir);
   }
   throw new Error(`No patch named ${id}`);
-}
-
-export function saveSpec(patch: Patch, spec: PatchSpec): void {
-  if (patch.source === "markdown") {
-    fs.writeFileSync(path.join(patch.dir, "PATCH.md"), renderPatchMd(patch, spec));
-  } else {
-    fs.writeFileSync(
-      path.join(patch.dir, "spec.json"),
-      `${JSON.stringify(spec, null, 2)}\n`,
-    );
-  }
-  patch.spec = spec;
 }
 
 export function removePatchDir(id: string): void {
@@ -253,36 +229,28 @@ function patchDefinitionPath(dir: string): string | undefined {
 
 function parsePatchMd(dir: string, markdown: string): Patch {
   const fallbackId = path.basename(dir);
-  const { attrs, body, bodyOffset } = parseFrontmatter(markdown);
+  const { attrs, body } = parseFrontmatter(markdown);
   const id = stringAttr(attrs.id) ?? fallbackId;
   if (id !== fallbackId)
     throw new Error(`${fallbackId}: PATCH.md id must match its directory name`);
-  const title = body.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? id;
-  const parsed = parseMarkdownEdits(id, body, bodyOffset);
   return {
     id,
     dir,
     // PATCH.md prose is agent-facing and intentionally free-form. Mechanical
     // code only reads frontmatter and fenced edit blocks.
     intent: markdown.trim(),
-    spec: { version: 1, files: parsed.files },
+    spec: { version: 1, files: parseMarkdownEdits(id, body) },
     source: "markdown",
-    summary: stringAttr(attrs.summary),
-    title,
-    markdown,
-    markdownBlocks: parsed.blocks,
   };
 }
 
 function parseFrontmatter(markdown: string): {
   attrs: Record<string, string>;
   body: string;
-  bodyOffset: number;
 } {
-  if (!markdown.startsWith("---\n"))
-    return { attrs: {}, body: markdown, bodyOffset: 0 };
+  if (!markdown.startsWith("---\n")) return { attrs: {}, body: markdown };
   const end = markdown.indexOf("\n---", 4);
-  if (end === -1) return { attrs: {}, body: markdown, bodyOffset: 0 };
+  if (end === -1) return { attrs: {}, body: markdown };
   const raw = markdown.slice(4, end).trim();
   const attrs: Record<string, string> = {};
   for (const line of raw.split(/\r?\n/)) {
@@ -291,21 +259,16 @@ function parseFrontmatter(markdown: string): {
   }
   let bodyOffset = end + 5;
   if (markdown.slice(bodyOffset).startsWith("\n")) bodyOffset++;
-  return { attrs, body: markdown.slice(bodyOffset), bodyOffset };
+  return { attrs, body: markdown.slice(bodyOffset) };
 }
 
 function stringAttr(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function parseMarkdownEdits(
-  id: string,
-  body: string,
-  bodyOffset: number,
-): { files: FileEntry[]; blocks: MarkdownEditBlock[] } {
+function parseMarkdownEdits(id: string, body: string): FileEntry[] {
   const byTarget = new Map<string, Replacement[]>();
   const targetOrder: string[] = [];
-  const blocks: MarkdownEditBlock[] = [];
 
   for (const fence of markdownFences(body)) {
     const target = targetFromFenceInfo(fence.info);
@@ -322,26 +285,14 @@ function parseMarkdownEdits(
     if (anchorHint) replacement.anchorHint = anchorHint;
     if (!byTarget.has(target)) targetOrder.push(target);
     const replacements = byTarget.get(target) ?? [];
-    const fileIndex = targetOrder.indexOf(target);
-    const replacementIndex = replacements.length;
     replacements.push(replacement);
     byTarget.set(target, replacements);
-    blocks.push({
-      start: bodyOffset + fence.start,
-      end: bodyOffset + fence.end,
-      fileIndex,
-      replacementIndex,
-      target,
-    });
   }
 
-  return {
-    files: targetOrder.map((target) => ({
-      target,
-      replacements: byTarget.get(target) ?? [],
-    })),
-    blocks,
-  };
+  return targetOrder.map((target) => ({
+    target,
+    replacements: byTarget.get(target) ?? [],
+  }));
 }
 
 function markdownFences(markdown: string): Array<{
@@ -437,55 +388,6 @@ function parseDiffBlock(block: string): Replacement | null {
   const oldText = oldLines.length ? `${oldLines.join("\n")}\n` : "";
   const newText = newLines.length ? `${newLines.join("\n")}\n` : "";
   return { oldText, newText };
-}
-
-function renderPatchMd(patch: Patch, spec: PatchSpec): string {
-  if (patch.markdown && patch.markdownBlocks?.length) {
-    let markdown = patch.markdown;
-    for (const block of [...patch.markdownBlocks].sort((a, b) => b.start - a.start)) {
-      const replacement = spec.files[block.fileIndex]?.replacements[block.replacementIndex];
-      if (!replacement) continue;
-      markdown = `${markdown.slice(0, block.start)}${renderSearchReplaceFence(
-        block.target,
-        replacement,
-      )}${markdown.slice(block.end)}`;
-    }
-    return markdown.endsWith("\n") ? markdown : `${markdown}\n`;
-  }
-
-  const title = patch.title ?? patch.id;
-  const summary = patch.summary ?? title;
-  const out: string[] = [
-    "---",
-    `id: ${patch.id}`,
-    `summary: ${summary}`,
-    "---",
-    "",
-    `# ${title}`,
-    "",
-    patch.intent.trim(),
-    "",
-  ];
-  for (const file of spec.files) {
-    for (const replacement of file.replacements)
-      out.push(renderSearchReplaceFence(file.target, replacement), "");
-  }
-  return `${out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd()}\n`;
-}
-
-function renderSearchReplaceFence(
-  target: string,
-  replacement: Replacement,
-): string {
-  return [
-    `\`\`\`patch file=${target}`,
-    "<<<<<<< SEARCH",
-    replacement.oldText.replace(/\n$/, ""),
-    "=======",
-    replacement.newText.replace(/\n$/, ""),
-    ">>>>>>> REPLACE",
-    "```",
-  ].join("\n");
 }
 
 function validateSpec(id: string, spec: PatchSpec): void {
@@ -597,7 +499,7 @@ function runEdits(patch: Patch, piRoot: string, reverse: boolean): boolean {
 /**
  * Validate the target file after an edit, choosing the validator by file
  * extension. Throws on failure. For unknown extensions there's no automatic
- * validator — the patch either applied (string replace succeeded) or it
+ * validator. The patch either applied (string replace succeeded) or it
  * didn't. This is what lets pi-patcher edit markdown prompts, plain text,
  * etc., not just compiled JS.
  */
@@ -625,78 +527,6 @@ export function count(haystack: string, needle: string): number {
 
 export function sha(text: string): string {
   return crypto.createHash("sha256").update(text).digest("hex");
-}
-
-// ── Derive a minimal unique replacement from a heal edit ─────
-//
-// Used by heal() after the AI rewrites the file: snap the diff out to the
-// nearest line boundaries on both sides, then grow the window until each
-// side is uniquely locatable in its respective text. The result becomes the
-// patch's new oldText/newText.
-
-export function derivePatch(
-  before: string,
-  after: string,
-): Replacement | null {
-  if (before === after) return null;
-
-  let start = 0;
-  while (
-    start < before.length &&
-    start < after.length &&
-    before[start] === after[start]
-  )
-    start++;
-  let endBefore = before.length - 1;
-  let endAfter = after.length - 1;
-  while (
-    endBefore >= start &&
-    endAfter >= start &&
-    before[endBefore] === after[endAfter]
-  ) {
-    endBefore--;
-    endAfter--;
-  }
-
-  let a = start;
-  while (a > 0 && before[a - 1] !== "\n") a--;
-  let b = endBefore + 1;
-  while (b < before.length && before[b] !== "\n") b++;
-  if (b < before.length) b++;
-  let c = start;
-  while (c > 0 && after[c - 1] !== "\n") c--;
-  let d = endAfter + 1;
-  while (d < after.length && after[d] !== "\n") d++;
-  if (d < after.length) d++;
-
-  let oldText = before.slice(a, b);
-  let newText = after.slice(c, d);
-
-  while (
-    (count(before, oldText) !== 1 || count(after, newText) !== 1) &&
-    (a > 0 || b < before.length || c > 0 || d < after.length)
-  ) {
-    if (a > 0) {
-      a--;
-      while (a > 0 && before[a - 1] !== "\n") a--;
-    }
-    if (c > 0) {
-      c--;
-      while (c > 0 && after[c - 1] !== "\n") c--;
-    }
-    if (b < before.length) {
-      while (b < before.length && before[b] !== "\n") b++;
-      if (b < before.length) b++;
-    }
-    if (d < after.length) {
-      while (d < after.length && after[d] !== "\n") d++;
-      if (d < after.length) d++;
-    }
-    oldText = before.slice(a, b);
-    newText = after.slice(c, d);
-  }
-
-  return { oldText, newText };
 }
 
 // ── Internal ─────────────────────────────────────────────────
