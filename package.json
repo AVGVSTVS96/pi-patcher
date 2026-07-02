@@ -1,6 +1,6 @@
 {
   "name": "pi-patcher",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Update-resilient self-healing patches for pi installs.",
   "author": {
     "name": "Bassim Shahidy",
