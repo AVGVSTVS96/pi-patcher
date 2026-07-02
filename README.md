@@ -57,40 +57,7 @@ A patch is just a folder in `~/.pi/patches/` with a `PATCH.md` file:
   PATCH.md
 ````
 
-`PATCH.md` is freeform markdown plus frontmatter and fenced edit blocks. The prose is fed to the AI when healing; mechanical apply only reads the frontmatter and edit fences:
-
-````md
----
-id: my-patch
-summary: What this patch does
-version: 0.1.0
-lastUpdated: 2026-06-25
----
-
-# My patch
-
-Whatever prose helps explain the patch.
-
-```patch file=dist/example.js
-<<<<<<< SEARCH
-old text
-=======
-new text
->>>>>>> REPLACE
-```
-````
-
-Diff-style hunks are also supported:
-
-````md
-```diff file=dist/example.js
-@@ optional hint @@
- context line
-+added line
-```
-````
-
-Each derived `oldText` must appear exactly once in the target file. `newText` must be non-empty, but deletion-only patches aren't supported in this version. Replace the line with a comment instead.
+`PATCH.md` is freeform markdown plus frontmatter and fenced edit blocks. The prose is fed to the AI when healing; mechanical apply only reads the frontmatter and edit fences. The format is defined by the [PATCH.md spec](https://patchmd.vercel.app) ([AVGVSTVS96/patch_md-spec](https://github.com/AVGVSTVS96/patch_md-spec)) — see it for the frontmatter fields, edit-block syntax, and anchoring rules.
 
 A patch can contain multiple fenced edits, across one or more files. Mechanical apply and revert iterate over every entry; heal runs one AI session per drifted patch, and the agent rewrites `PATCH.md` itself. Legacy `intent.md` + `spec.json` patch folders are still read for backwards compatibility.
 
